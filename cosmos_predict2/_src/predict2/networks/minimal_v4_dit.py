@@ -38,6 +38,7 @@ from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from packaging.version import Version
 from torch import nn
+from torch.nn import functional as F
 from torch.distributed import ProcessGroup, get_process_group_ranks
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper as ptd_checkpoint_wrapper
@@ -1655,6 +1656,7 @@ class MiniTrainDIT(WeightTrainingStat):
         x_B_C_T_H_W: torch.Tensor,
         fps: Optional[torch.Tensor] = None,
         padding_mask: Optional[torch.Tensor] = None,
+        target_mask_B_C_T_H_W: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Prepares an embedded sequence tensor by applying positional embeddings and handling padding masks.
@@ -1687,6 +1689,14 @@ class MiniTrainDIT(WeightTrainingStat):
             x_B_C_T_H_W = torch.cat(
                 [x_B_C_T_H_W, padding_mask.unsqueeze(1).repeat(1, 1, x_B_C_T_H_W.shape[2], 1, 1)], dim=1
             )
+        if target_mask_B_C_T_H_W is not None:
+            if target_mask_B_C_T_H_W.shape[2:] != x_B_C_T_H_W.shape[2:]:
+                target_mask_B_C_T_H_W = F.interpolate(
+                    target_mask_B_C_T_H_W.type_as(x_B_C_T_H_W),
+                    size=x_B_C_T_H_W.shape[2:],
+                    mode="nearest",
+                )
+            x_B_C_T_H_W = torch.cat([x_B_C_T_H_W, target_mask_B_C_T_H_W.type_as(x_B_C_T_H_W)], dim=1)
         x_B_T_H_W_D = self.x_embedder(x_B_C_T_H_W)
 
         if self.extra_per_block_abs_pos_emb:
@@ -1720,6 +1730,7 @@ class MiniTrainDIT(WeightTrainingStat):
         data_type: Optional[DataType] = DataType.VIDEO,
         intermediate_feature_ids: Optional[List[int]] = None,
         img_context_emb: Optional[torch.Tensor] = None,
+        target_mask_B_C_T_H_W: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | List[torch.Tensor] | Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         Args:
@@ -1734,6 +1745,7 @@ class MiniTrainDIT(WeightTrainingStat):
             x_B_C_T_H_W,
             fps=fps,
             padding_mask=padding_mask,
+            target_mask_B_C_T_H_W=target_mask_B_C_T_H_W,
         )
 
         if self.use_crossattn_projection:

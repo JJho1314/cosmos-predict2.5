@@ -43,6 +43,12 @@ class Video2WorldCondition(Text2WorldCondition):
     # the following two attributes are used to set the video condition; during training, inference
     gt_frames: Optional[torch.Tensor] = None
     condition_video_input_mask_B_C_T_H_W: Optional[torch.Tensor] = None
+    target_mask_B_C_T_H_W: Optional[torch.Tensor] = None
+
+    def set_target_mask(self, target_mask: Optional[torch.Tensor]) -> "Video2WorldCondition":
+        kwargs = self.to_dict(skip_underscore=False)
+        kwargs["target_mask_B_C_T_H_W"] = target_mask
+        return type(self)(**kwargs)
 
     def set_video_condition(
         self,
@@ -150,9 +156,11 @@ class Video2WorldCondition(Text2WorldCondition):
         # extra efforts
         gt_frames = self.gt_frames
         condition_video_input_mask_B_C_T_H_W = self.condition_video_input_mask_B_C_T_H_W
+        target_mask_B_C_T_H_W = self.target_mask_B_C_T_H_W
         kwargs = self.to_dict(skip_underscore=False)
         kwargs["gt_frames"] = None
         kwargs["condition_video_input_mask_B_C_T_H_W"] = None
+        kwargs["target_mask_B_C_T_H_W"] = None
         new_condition = Text2WorldCondition.broadcast(
             type(self)(**kwargs),
             process_group,
@@ -177,10 +185,16 @@ class Video2WorldCondition(Text2WorldCondition):
                         condition_video_input_mask_B_C_T_H_W, "b c t h w -> b c (t h w)"
                     )
                     gt_frames = rearrange(gt_frames, "b c t h w -> b c (t h w)")
+                    if target_mask_B_C_T_H_W is not None:
+                        target_mask_B_C_T_H_W = rearrange(target_mask_B_C_T_H_W, "b c t h w -> b c (t h w)")
                 gt_frames = broadcast_split_tensor(gt_frames, seq_dim=2, process_group=process_group)
                 condition_video_input_mask_B_C_T_H_W = broadcast_split_tensor(
                     condition_video_input_mask_B_C_T_H_W, seq_dim=2, process_group=process_group
                 )
+                if target_mask_B_C_T_H_W is not None:
+                    target_mask_B_C_T_H_W = broadcast_split_tensor(
+                        target_mask_B_C_T_H_W, seq_dim=2, process_group=process_group
+                    )
                 if use_spatial_split:
                     condition_video_input_mask_B_C_T_H_W = rearrange(
                         condition_video_input_mask_B_C_T_H_W,
@@ -191,8 +205,16 @@ class Video2WorldCondition(Text2WorldCondition):
                     gt_frames = rearrange(
                         gt_frames, "b c (t h w) -> b c t h w", t=after_split_shape[0], h=after_split_shape[1]
                     )
+                    if target_mask_B_C_T_H_W is not None:
+                        target_mask_B_C_T_H_W = rearrange(
+                            target_mask_B_C_T_H_W,
+                            "b c (t h w) -> b c t h w",
+                            t=after_split_shape[0],
+                            h=after_split_shape[1],
+                        )
         kwargs["gt_frames"] = gt_frames
         kwargs["condition_video_input_mask_B_C_T_H_W"] = condition_video_input_mask_B_C_T_H_W
+        kwargs["target_mask_B_C_T_H_W"] = target_mask_B_C_T_H_W
         return type(self)(**kwargs)
 
 

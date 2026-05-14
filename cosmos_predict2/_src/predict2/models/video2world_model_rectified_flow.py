@@ -18,6 +18,7 @@ from typing import Callable, Dict, Literal, Optional, Tuple
 
 import attrs
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from megatron.core import parallel_state
 from torch import Tensor
@@ -51,6 +52,7 @@ class Video2WorldModelRectifiedFlowConfig(Text2WorldModelRectifiedFlowConfig):
     conditioning_strategy: str = str(ConditioningStrategy.FRAME_REPLACE)  # What strategy to use for conditioning
     denoise_replace_gt_frames: bool = True  # Whether to denoise the ground truth frames
     conditional_frames_probs: Optional[Dict[int, float]] = None  # Probability distribution for conditional frames
+    target_mask_condition_frames_only: bool = True  # Keep target mask on video-conditioning frames, TAViD-style.
 
     def __attrs_post_init__(self):
         super().__attrs_post_init__()
@@ -72,6 +74,13 @@ class Video2WorldModelRectifiedFlow(Text2WorldModelRectifiedFlow):
             num_conditional_frames=data_batch.get(NUM_CONDITIONAL_FRAMES_KEY, None),
             conditional_frames_probs=self.config.conditional_frames_probs,
         )
+        target_mask = data_batch.get("target_mask", None)
+        if target_mask is not None:
+            target_mask = target_mask.to(device=latent_state.device, dtype=latent_state.dtype)
+            target_mask = F.interpolate(target_mask, size=latent_state.shape[2:], mode="nearest")
+            if self.config.target_mask_condition_frames_only:
+                target_mask = target_mask * condition.condition_video_input_mask_B_C_T_H_W.type_as(target_mask)
+            condition = condition.set_target_mask(target_mask)
         return raw_state, latent_state, condition
 
     def denoise(

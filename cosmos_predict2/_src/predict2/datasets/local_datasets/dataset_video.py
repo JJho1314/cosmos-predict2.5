@@ -25,9 +25,12 @@ from typing import Any, Callable, Optional
 import numpy as np
 import torch
 from decord import VideoReader, cpu
+from PIL import Image
 from megatron.core import parallel_state
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from torchvision import transforms as T
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms import functional as TF
 
 from cosmos_predict2._src.imaginaire.lazy_config import LazyCall as L
 from cosmos_predict2._src.imaginaire.utils import log
@@ -43,6 +46,9 @@ class VideoDataset(Dataset):
         prompt_type: str | None = None,  # "long", "short", "medium", or None for auto
         caption_format: str = "auto",  # "text", "json", or "auto"
         video_paths: Optional[list[str]] = None,
+        target_mask_dir: Optional[str] = None,
+        target_mask_default_to_zero: bool = True,
+        target_prompt_suffix: str = "",
     ) -> None:
         """Dataset class for loading image-text-to-video generation data.
 
@@ -65,6 +71,9 @@ class VideoDataset(Dataset):
         self.sequence_length = num_frames
         self.prompt_type = prompt_type
         self.caption_format = caption_format
+        self.target_mask_dir = self._resolve_target_mask_dir(target_mask_dir)
+        self.target_mask_default_to_zero = target_mask_default_to_zero
+        self.target_prompt_suffix = target_prompt_suffix
 
         # Determine caption format and directory
         self._setup_caption_format()
@@ -80,6 +89,7 @@ class VideoDataset(Dataset):
 
         self.num_failed_loads = 0
         self.preprocess = T.Compose([ToTensorVideo(), ResizePreprocess((video_size[0], video_size[1]))])
+        self.mask_size = (video_size[0], video_size[1])
 
     def __str__(self) -> str:
         return f"{len(self.video_paths)} samples from {self.dataset_dir}"
@@ -87,7 +97,25 @@ class VideoDataset(Dataset):
     def __len__(self) -> int:
         return len(self.video_paths)
 
-    def _load_video(self, video_path: str) -> tuple[np.ndarray, float]:
+    def _resolve_target_mask_dir(self, target_mask_dir: Optional[str]) -> Optional[str]:
+        """Resolve optional target-mask directory for TAViD-style conditioning."""
+        if target_mask_dir is None:
+            for dirname in ("masks", "target_masks"):
+                candidate = os.path.join(self.dataset_dir, dirname)
+                if os.path.isdir(candidate):
+                    return candidate
+            return None
+        if target_mask_dir.lower() == "none":
+            return None
+        if target_mask_dir.lower() == "auto":
+            for dirname in ("masks", "target_masks"):
+                candidate = os.path.join(self.dataset_dir, dirname)
+                if os.path.isdir(candidate):
+                    return candidate
+            return None
+        return target_mask_dir
+
+    def _load_video(self, video_path: str) -> tuple[np.ndarray, float, np.ndarray]:
         vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
         total_frames = len(vr)
         if total_frames < self.sequence_length:
@@ -110,7 +138,7 @@ class VideoDataset(Dataset):
         except Exception:  # failed to read FPS, assume it is 16
             fps = 16
         del vr  # delete the reader to avoid memory leak
-        return frame_data, fps
+        return frame_data, fps, np.asarray(frame_ids, dtype=np.int64)
 
     def _setup_caption_format(self) -> None:
         """Determine the caption format and set up the caption directory."""
@@ -182,18 +210,91 @@ class VideoDataset(Dataset):
             log.warning(f"Failed to read JSON caption file {json_path}: {e}")
             return ""
 
-    def _get_frames(self, video_path: str) -> tuple[torch.Tensor, float]:
-        frames, fps = self._load_video(video_path)
+    def _get_frames(self, video_path: str) -> tuple[torch.Tensor, float, np.ndarray]:
+        frames, fps, frame_ids = self._load_video(video_path)
         frames = frames.astype(np.uint8)
         frames = torch.from_numpy(frames).permute(0, 3, 1, 2)  # [T, C, H, W]
         frames = self.preprocess(frames)
         frames = torch.clamp(frames * 255.0, 0, 255).to(torch.uint8)
-        return frames, fps
+        return frames, fps, frame_ids
+
+    def _target_mask_path_candidates(self, video_basename: str) -> list[str]:
+        if self.target_mask_dir is None:
+            return []
+        return [
+            os.path.join(self.target_mask_dir, f"{video_basename}{ext}")
+            for ext in (".mp4", ".npz", ".png", ".jpg", ".jpeg", ".webp")
+        ]
+
+    def _resize_binary_mask_video(self, mask: torch.Tensor) -> torch.Tensor:
+        """Resize [T,1,H,W] mask video and return [1,T,H,W]."""
+        mask = torch.stack(
+            [TF.resize(frame, self.mask_size, interpolation=InterpolationMode.NEAREST) for frame in mask.float()]
+        )
+        mask = (mask > 0.5).float()
+        return mask.permute(1, 0, 2, 3).contiguous()
+
+    def _load_npz_target_mask(self, mask_path: str, frame_ids: np.ndarray) -> torch.Tensor:
+        mask_npz = np.load(mask_path, allow_pickle=True)
+        key = "masks" if "masks" in mask_npz.files else mask_npz.files[0]
+        mask_arr = mask_npz[key]
+        if mask_arr.ndim == 5:
+            # RoboInter SAM files are typically [N,T,1,H,W]. Merge annotated target
+            # masks when multiple instances are present.
+            mask_arr = mask_arr.max(axis=0)
+        if mask_arr.ndim == 4:
+            if mask_arr.shape[1] == 1:  # [T,1,H,W]
+                mask_arr = mask_arr[:, 0]
+            elif mask_arr.shape[0] == 1:  # [1,T,H,W]
+                mask_arr = mask_arr[0]
+            else:
+                mask_arr = mask_arr.max(axis=0)
+        if mask_arr.ndim == 2:
+            mask_arr = np.repeat(mask_arr[None], len(frame_ids), axis=0)
+        if mask_arr.ndim != 3:
+            raise ValueError(f"Unsupported target mask shape {mask_arr.shape} in {mask_path}")
+        valid_frame_ids = np.clip(frame_ids, 0, mask_arr.shape[0] - 1)
+        mask_arr = mask_arr[valid_frame_ids]
+        mask = torch.from_numpy(mask_arr).unsqueeze(1).float()  # [T,1,H,W]
+        return self._resize_binary_mask_video(mask)
+
+    def _load_target_mask(self, video_basename: str, frame_ids: np.ndarray) -> torch.Tensor:
+        """Load target mask as [1,T,H,W].
+
+        If a mask video exists, it is sampled with the same frame ids as the RGB video.
+        If a single image mask exists, it is treated like TAViD's initial-frame target mask
+        and placed on the first sampled frame only; all future frames are zero.
+        """
+        T_frames = len(frame_ids)
+        zero_mask = torch.zeros(1, T_frames, *self.mask_size, dtype=torch.float32)
+        mask_path = next((path for path in self._target_mask_path_candidates(video_basename) if os.path.exists(path)), None)
+        if mask_path is None:
+            if self.target_mask_default_to_zero:
+                return zero_mask
+            raise FileNotFoundError(f"Target mask for {video_basename} not found in {self.target_mask_dir}")
+
+        if mask_path.endswith(".mp4"):
+            mask_reader = VideoReader(mask_path, ctx=cpu(0), num_threads=1)
+            valid_frame_ids = np.clip(frame_ids, 0, len(mask_reader) - 1).tolist()
+            mask_frames = mask_reader.get_batch(valid_frame_ids).asnumpy()
+            mask_reader.seek(0)
+            del mask_reader
+            mask = torch.from_numpy(mask_frames[..., 0]).unsqueeze(1).float() / 255.0  # [T,1,H,W]
+            return self._resize_binary_mask_video(mask)
+
+        if mask_path.endswith(".npz"):
+            return self._load_npz_target_mask(mask_path, frame_ids)
+
+        mask_img = Image.open(mask_path).convert("L")
+        mask = TF.to_tensor(mask_img)
+        mask = TF.resize(mask, self.mask_size, interpolation=InterpolationMode.NEAREST)
+        zero_mask[:, 0] = (mask > 0.5).float()
+        return zero_mask
 
     def __getitem__(self, index: int) -> dict | Any:
         try:
             data = dict()
-            video, fps = self._get_frames(self.video_paths[index])
+            video, fps, frame_ids = self._get_frames(self.video_paths[index])
             video = video.permute(1, 0, 2, 3)  # Rearrange from [T, C, H, W] to [C, T, H, W]
 
             # Load caption based on format
@@ -206,9 +307,13 @@ class VideoDataset(Dataset):
             else:  # text format
                 caption_path = os.path.join(self.caption_dir, f"{video_basename}.txt")
                 caption = self._load_text(Path(caption_path))
+            if self.target_prompt_suffix:
+                caption = f"{caption.rstrip()} {self.target_prompt_suffix.strip()}".strip()
 
             data["video"] = video
             data["ai_caption"] = caption
+            if self.target_mask_dir is not None or self.target_prompt_suffix:
+                data["target_mask"] = self._load_target_mask(video_basename, frame_ids)
 
             _, _, h, w = video.shape
 

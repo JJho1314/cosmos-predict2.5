@@ -199,10 +199,37 @@ _video_dataset_droid_failure_all = L(VideoDataset)(
     num_frames=33,
     video_size=_DROID_VIDEO_SIZE_480,
 )
+_video_dataset_droid_success_train_tavid_mask = L(VideoDataset)(
+    dataset_dir=_DATASET_DIR_DROID_SUCCESS_TRAIN_480,
+    num_frames=33,
+    video_size=_DROID_VIDEO_SIZE_480,
+    target_mask_dir="auto",
+    target_prompt_suffix="The robot interacts with the target object.",
+)
+_video_dataset_droid_success_test_tavid_mask = L(VideoDataset)(
+    dataset_dir=_DATASET_DIR_DROID_SUCCESS_TEST_480,
+    num_frames=33,
+    video_size=_DROID_VIDEO_SIZE_480,
+    target_mask_dir="auto",
+    target_prompt_suffix="The robot interacts with the target object.",
+)
+_video_dataset_droid_failure_all_tavid_mask = L(VideoDataset)(
+    dataset_dir=_DATASET_DIR_DROID_FAILURE_CLEAN_480,
+    num_frames=33,
+    video_size=_DROID_VIDEO_SIZE_480,
+    target_mask_dir="auto",
+    target_prompt_suffix="The robot interacts with the target object.",
+)
 _video_dataset_droid_success_failure = L(ConcatDataset)(
     datasets=[
         _video_dataset_droid_success_train,
         _video_dataset_droid_failure_all,
+    ],
+)
+_video_dataset_droid_success_failure_tavid_mask = L(ConcatDataset)(
+    datasets=[
+        _video_dataset_droid_success_train_tavid_mask,
+        _video_dataset_droid_failure_all_tavid_mask,
     ],
 )
 _dataloader_train_droid_success_failure = L(get_generic_dataloader)(
@@ -220,6 +247,26 @@ _dataloader_val_droid_success = L(get_generic_dataloader)(
     sampler=L(get_sampler)(dataset=_video_dataset_droid_success_test),
     batch_size=1,
     drop_last=True,
+    num_workers=4,
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=2,
+)
+_dataloader_train_droid_success_failure_tavid_mask = L(get_generic_dataloader)(
+    dataset=_video_dataset_droid_success_failure_tavid_mask,
+    sampler=L(get_sampler)(dataset=_video_dataset_droid_success_failure_tavid_mask),
+    batch_size=1,
+    drop_last=True,
+    num_workers=8,
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=2,
+)
+_dataloader_val_droid_success_tavid_mask = L(get_generic_dataloader)(
+    dataset=_video_dataset_droid_success_test_tavid_mask,
+    sampler=L(get_sampler)(dataset=_video_dataset_droid_success_test_tavid_mask),
+    batch_size=1,
+    drop_last=False,
     num_workers=4,
     pin_memory=True,
     persistent_workers=True,
@@ -380,6 +427,69 @@ predict2_video2world_training_2b_droid_success_failure = dict(
 )
 
 
+# TAViD-style target-mask conditioning. The architecture appends one inert
+# target-mask input channel after the pretrained latent/condition/padding
+# channels, so loading the base checkpoint with dcp_allow_mismatched_size keeps
+# pretrained behavior and leaves the new mask channel zero-initialized.
+predict2_video2world_training_2b_droid_success_failure_tavid_mask = dict(
+    defaults=[
+        f"/experiment/{DEFAULT_CHECKPOINT_2B.experiment}",
+        {"override /data_train": "mock"},
+        {"override /data_val": "mock"},
+        "_self_",
+    ],
+    dataloader_train=_dataloader_train_droid_success_failure_tavid_mask,
+    dataloader_val=_dataloader_val_droid_success_tavid_mask,
+    checkpoint=dict(
+        save_iter=1000,
+        # pyrefly: ignore  # missing-attribute
+        load_path=get_checkpoint_path(DEFAULT_CHECKPOINT_2B.s3.uri),
+        load_from_object_store=dict(enabled=False),
+        save_to_object_store=dict(enabled=False),
+        dcp_allow_mismatched_size=True,
+    ),
+    job=dict(
+        project="cosmos_predict_v2p5",
+        group="video2world",
+        name="2b_droid_success_failure_tavid_mask_480",
+        wandb_mode="online",
+    ),
+    optimizer=dict(lr=2 ** (-14.5), weight_decay=0.001),
+    scheduler=dict(
+        f_max=[0.5],
+        f_min=[0.2],
+        warm_up_steps=[1_000],
+        cycle_lengths=[100000],
+    ),
+    trainer=dict(
+        logging_iter=100,
+        max_iter=10000,
+        validation_iter=10000,
+        run_validation=True,
+        run_validation_on_start=False,
+        max_val_iter=64,
+        straggler_detection=dict(enabled=False),
+        callbacks=dict(
+            heart_beat=dict(save_s3=False),
+            iter_speed=dict(hit_thres=100, save_s3=False),
+            device_monitor=dict(save_s3=False),
+            every_n_sample_reg=dict(every_n=1000, save_s3=False),
+            every_n_sample_ema=dict(every_n=1000, save_s3=False),
+            wandb=dict(save_s3=False),
+            wandb_10x=dict(save_s3=False),
+            dataloader_speed=dict(save_s3=False),
+        ),
+    ),
+    model_parallel=dict(context_parallel_size=1),
+    model=dict(
+        config=dict(
+            target_mask_condition_frames_only=True,
+            net=dict(concat_target_mask=True),
+        ),
+    ),
+)
+
+
 cs = ConfigStore.instance()
 for _item in [
     predict2_video2world_training_2b_robointer_droid_sanity,
@@ -387,6 +497,7 @@ for _item in [
     predict2_video2world_training_2b_droid_success,
     predict2_video2world_training_2b_droid_success_phase2,
     predict2_video2world_training_2b_droid_success_failure,
+    predict2_video2world_training_2b_droid_success_failure_tavid_mask,
 ]:
     experiment_name = [name.lower() for name, value in globals().items() if value is _item][0]
     cs.store(
