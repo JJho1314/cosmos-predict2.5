@@ -17,7 +17,6 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from cosmos_predict2._src.imaginaire.auxiliary.guardrail.common import presets as guardrail_presets
 from cosmos_predict2._src.imaginaire.flags import SMOKE
 from cosmos_predict2._src.imaginaire.lazy_config.lazy import LazyConfig
 from cosmos_predict2._src.imaginaire.utils import distributed, log
@@ -61,6 +60,10 @@ class Inference:
         self.guardrail_enabled = not args.disable_guardrails
 
         if self.rank0 and self.guardrail_enabled:
+            # Import guardrails lazily so `--disable-guardrails` doesn't try
+            # to download gated guardrail assets at import time.
+            from cosmos_predict2._src.imaginaire.auxiliary.guardrail.common import presets as guardrail_presets
+
             self.text_guardrail_runner = guardrail_presets.create_text_guardrail_runner(
                 offload_model_to_cpu=args.offload_guardrail_models
             )
@@ -99,6 +102,8 @@ class Inference:
 
             # run text guardrail on the prompt
             if self.text_guardrail_runner is not None:
+                from cosmos_predict2._src.imaginaire.auxiliary.guardrail.common import presets as guardrail_presets
+
                 if not guardrail_presets.run_text_guardrail(sample.prompt, self.text_guardrail_runner):
                     message = f"Guardrail blocked text2world generation. Prompt: {sample.prompt}"
                     log.critical(message)
@@ -147,6 +152,8 @@ class Inference:
 
             # run video guardrail on the video
             if self.video_guardrail_runner is not None:
+                from cosmos_predict2._src.imaginaire.auxiliary.guardrail.common import presets as guardrail_presets
+
                 log.info("Running guardrail check on video...")
                 frames = (video * 255.0).clamp(0.0, 255.0).to(torch.uint8)
                 frames = frames.permute(1, 2, 3, 0).cpu().numpy().astype(np.uint8)  # (T, H, W, C)

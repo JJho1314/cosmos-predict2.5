@@ -164,6 +164,43 @@ class CheckpointConfig(pydantic.BaseModel):
     @cached_property
     def path(self) -> str:
         """Return S3 URI or local path."""
+        # Prefer local mirrors (avoids gated HuggingFace downloads).
+        # Layout example:
+        #   $COSMOS_CHECKPOINTS_DIR/Cosmos-Predict2.5-2B/base/pre-trained/<uuid>_ema_bf16.pt
+        cosmos_dir = os.environ.get("COSMOS_CHECKPOINTS_DIR")
+        if cosmos_dir and self.hf is not None:
+            candidates: list[str] = []
+            repo_base = self.hf.repository.split("/")[-1]  # e.g. Cosmos-Predict2.5-2B
+            name_base = self.name.split("/")[-1]  # e.g. Qwen2.5-VL-7B-Instruct
+            for base in (repo_base, name_base):
+                if not base:
+                    continue
+                if isinstance(self.hf, CheckpointFileHf):
+                    candidates.append(os.path.join(cosmos_dir, base, self.hf.filename))
+                elif isinstance(self.hf, CheckpointDirHf):
+                    candidates.append(
+                        os.path.join(cosmos_dir, base, self.hf.subdirectory)
+                        if self.hf.subdirectory
+                        else os.path.join(cosmos_dir, base)
+                    )
+            for candidate in dict.fromkeys(candidates):
+                if os.path.exists(candidate):
+                    log.info(f"Using local checkpoint from COSMOS_CHECKPOINTS_DIR: {candidate}")
+                    return candidate
+            # Local mirror dir is set but this checkpoint isn't there.
+            # Return a placeholder so eager-import code paths (e.g., 14B training
+            # configs evaluated at module load) don't trigger an HF download.
+            # Inference passes its checkpoint via --checkpoint-path, so the
+            # placeholder is harmless for the requested model.
+            placeholder = candidates[0] if candidates else os.path.join(cosmos_dir, self.uuid)
+            log.warning(
+                f"Checkpoint {self.name}({self.uuid}) not found locally under "
+                f"COSMOS_CHECKPOINTS_DIR; returning placeholder {placeholder}. "
+                f"If this checkpoint is actually needed at runtime, place the "
+                f"file at that path or unset COSMOS_CHECKPOINTS_DIR."
+            )
+            return placeholder
+
         if INTERNAL and self.s3 is not None:
             return self.s3.uri
         if self.hf is None:
