@@ -496,6 +496,7 @@ class Attention(nn.Module):
         self._query_dim = query_dim
         self._context_dim = context_dim
         self._inner_dim = inner_dim
+        self.last_target_attn_map_B_S: Optional[torch.Tensor] = None
 
     def init_weights(self) -> None:
         std = 1.0 / math.sqrt(self._query_dim)
@@ -558,6 +559,34 @@ class Attention(nn.Module):
         result = self.attn_op(q, k, v, **additional_args)  # [B, S, H, D]
         return self.output_dropout(self.output_proj(result))
 
+    def compute_target_attention_map(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        target_token_indices_B: torch.Tensor,
+        query_chunk_size: int = 2048,
+    ) -> Optional[torch.Tensor]:
+        if target_token_indices_B is None:
+            return None
+        valid_B = target_token_indices_B >= 0
+        if not bool(valid_B.any()):
+            return None
+
+        B, S, _, _ = q.shape
+        L = k.shape[1]
+        token_indices_B = target_token_indices_B.to(device=q.device, dtype=torch.long).clamp(min=0, max=L - 1)
+        target_maps = []
+        scale = 1.0 / math.sqrt(self.head_dim)
+        for start in range(0, S, query_chunk_size):
+            q_chunk = q[:, start : start + query_chunk_size].float()
+            scores = torch.einsum("bshd,blhd->bhsl", q_chunk, k.float()) * scale
+            probs = scores.softmax(dim=-1)
+            gather_idx = token_indices_B[:, None, None, None].expand(B, self.n_heads, q_chunk.shape[1], 1)
+            target_prob = probs.gather(dim=-1, index=gather_idx).squeeze(-1).mean(dim=1)
+            target_prob = target_prob * valid_B[:, None].type_as(target_prob)
+            target_maps.append(target_prob)
+        return torch.cat(target_maps, dim=1)
+
     def forward(
         self,
         x,
@@ -565,6 +594,9 @@ class Attention(nn.Module):
         rope_emb: Optional[torch.Tensor] = None,
         video_size: Optional[VideoSize] = None,
         kv_cache_cfg: Optional[KVCacheConfig] = None,
+        capture_target_attention: bool = False,
+        target_token_indices_B: Optional[torch.Tensor] = None,
+        target_attention_query_chunk_size: int = 2048,
     ):
         """
         Args:
@@ -574,6 +606,14 @@ class Attention(nn.Module):
             video_size(VideoSize): Shape [T, H, W]
         """
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
+        self.last_target_attn_map_B_S = None
+        if capture_target_attention and context is not None:
+            self.last_target_attn_map_B_S = self.compute_target_attention_map(
+                q,
+                k,
+                target_token_indices_B,
+                query_chunk_size=target_attention_query_chunk_size,
+            )
         return self.compute_attention(q, k, v, video_size=video_size, kv_cache_cfg=kv_cache_cfg)
 
     def set_context_parallel_group(self, process_group, ranks, stream, cp_comm_type: str = "p2p"):
@@ -620,8 +660,19 @@ class I2VCrossAttention(Attention):
         x,
         context=None,
         rope_emb=None,
+        capture_target_attention: bool = False,
+        target_token_indices_B: Optional[torch.Tensor] = None,
+        target_attention_query_chunk_size: int = 2048,
     ):
         q, k, v, k_img, v_img = self.compute_qkv(x, context, rope_emb)
+        self.last_target_attn_map_B_S = None
+        if capture_target_attention:
+            self.last_target_attn_map_B_S = self.compute_target_attention_map(
+                q,
+                k,
+                target_token_indices_B,
+                query_chunk_size=target_attention_query_chunk_size,
+            )
         return self.compute_attention(q, k, v, k_img, v_img)
 
 
@@ -1265,6 +1316,9 @@ class Block(nn.Module):
         adaln_lora_B_T_3D: Optional[torch.Tensor] = None,
         extra_per_block_pos_emb: Optional[torch.Tensor] = None,
         kv_cache_cfg: Optional[KVCacheConfig] = None,
+        capture_target_cross_attn: bool = False,
+        target_token_indices_B: Optional[torch.Tensor] = None,
+        target_attention_query_chunk_size: int = 2048,
     ) -> torch.Tensor:
         if extra_per_block_pos_emb is not None:
             x_B_T_H_W_D = x_B_T_H_W_D + extra_per_block_pos_emb
@@ -1355,6 +1409,9 @@ class Block(nn.Module):
                     rearrange(_normalized_x_B_T_H_W_D, "b t h w d -> b (t h w) d"),
                     crossattn_emb,
                     rope_emb=rope_emb_L_1_1_D,
+                    capture_target_attention=capture_target_cross_attn,
+                    target_token_indices_B=target_token_indices_B,
+                    target_attention_query_chunk_size=target_attention_query_chunk_size,
                 ),
                 "b (t h w) d -> b t h w d",
                 t=T,
@@ -1487,6 +1544,8 @@ class MiniTrainDIT(WeightTrainingStat):
         natten_parameters: Union[dict, list] = None,
         # if True, will closely match wan's strategy to use fp32 in certain layers/operations
         use_wan_fp32_strategy: bool = False,
+        tavid_attn_alignment_blocks: Optional[List[int]] = None,
+        tavid_attn_query_chunk_size: int = 2048,
     ) -> None:
         super().__init__()
         self.max_img_h = max_img_h
@@ -1527,6 +1586,10 @@ class MiniTrainDIT(WeightTrainingStat):
         self.use_crossattn_projection = use_crossattn_projection
         self.crossattn_proj_in_channels = crossattn_proj_in_channels
         self.use_wan_fp32_strategy = use_wan_fp32_strategy
+        self.tavid_attn_alignment_blocks = set(tavid_attn_alignment_blocks or [])
+        self.tavid_attn_query_chunk_size = tavid_attn_query_chunk_size
+        self.tavid_target_attn_maps: list[torch.Tensor] = []
+        self.tavid_target_mask_B_T_H_W: Optional[torch.Tensor] = None
 
         self.blocks = nn.ModuleList(
             [
@@ -1710,6 +1773,26 @@ class MiniTrainDIT(WeightTrainingStat):
 
         return x_B_T_H_W_D, None, extra_pos_emb
 
+    def make_target_mask_tokens(self, target_mask_B_C_T_H_W: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if target_mask_B_C_T_H_W is None:
+            return None
+        target_mask = target_mask_B_C_T_H_W.float()
+        _, _, T, H, W = target_mask.shape
+        T = T - (T % self.patch_temporal)
+        H = H - (H % self.patch_spatial)
+        W = W - (W % self.patch_spatial)
+        target_mask = target_mask[:, :, :T, :H, :W]
+        if target_mask.numel() == 0:
+            return None
+        target_mask = rearrange(
+            target_mask,
+            "b c (t pt) (h ph) (w pw) -> b t h w (c pt ph pw)",
+            pt=self.patch_temporal,
+            ph=self.patch_spatial,
+            pw=self.patch_spatial,
+        )
+        return target_mask.mean(dim=-1).clamp(0, 1)
+
     def unpatchify(self, x_B_T_H_W_M):
         x_B_C_Tt_Hp_Wp = rearrange(
             x_B_T_H_W_M,
@@ -1731,6 +1814,7 @@ class MiniTrainDIT(WeightTrainingStat):
         intermediate_feature_ids: Optional[List[int]] = None,
         img_context_emb: Optional[torch.Tensor] = None,
         target_mask_B_C_T_H_W: Optional[torch.Tensor] = None,
+        tgt_token_indices_B: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | List[torch.Tensor] | Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         Args:
@@ -1741,6 +1825,8 @@ class MiniTrainDIT(WeightTrainingStat):
         assert isinstance(data_type, DataType), (
             f"Expected DataType, got {type(data_type)}. We need discuss this flag later."
         )
+        self.tavid_target_attn_maps = []
+        self.tavid_target_mask_B_T_H_W = self.make_target_mask_tokens(target_mask_B_C_T_H_W)
         x_B_T_H_W_D, rope_emb_L_1_1_D, extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D = self.prepare_embedded_sequence(
             x_B_C_T_H_W,
             fps=fps,
@@ -1783,6 +1869,11 @@ class MiniTrainDIT(WeightTrainingStat):
 
         intermediate_features_outputs = []
         for i, block in enumerate(self.blocks):
+            capture_target_cross_attn = (
+                i in self.tavid_attn_alignment_blocks
+                and tgt_token_indices_B is not None
+                and self.tavid_target_mask_B_T_H_W is not None
+            )
             x_B_T_H_W_D = block(
                 x_B_T_H_W_D,
                 t_embedding_B_T_D,
@@ -1790,7 +1881,20 @@ class MiniTrainDIT(WeightTrainingStat):
                 rope_emb_L_1_1_D=rope_emb_L_1_1_D,
                 adaln_lora_B_T_3D=adaln_lora_B_T_3D,
                 extra_per_block_pos_emb=extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D,
+                capture_target_cross_attn=capture_target_cross_attn,
+                target_token_indices_B=tgt_token_indices_B,
+                target_attention_query_chunk_size=self.tavid_attn_query_chunk_size,
             )
+            if capture_target_cross_attn and self.blocks[i].cross_attn.last_target_attn_map_B_S is not None:
+                self.tavid_target_attn_maps.append(
+                    rearrange(
+                        self.blocks[i].cross_attn.last_target_attn_map_B_S,
+                        "b (t h w) -> b t h w",
+                        t=T,
+                        h=H,
+                        w=W,
+                    )
+                )
             if intermediate_feature_ids and i in intermediate_feature_ids:
                 x_reshaped_for_disc = rearrange(x_B_T_H_W_D, "b tp hp wp d -> b (tp hp wp) d")
                 intermediate_features_outputs.append(x_reshaped_for_disc)

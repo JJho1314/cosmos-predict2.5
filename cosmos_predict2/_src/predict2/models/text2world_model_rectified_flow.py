@@ -909,6 +909,10 @@ class Text2WorldModelRectifiedFlow(ImaginaireModel):
             "model_pred": vt_pred_B_C_T_H_W,
             "edm_loss": loss,
         }
+        if hasattr(self, "compute_extra_training_loss"):
+            extra_output, extra_loss = self.compute_extra_training_loss(condition)
+            output_batch.update(extra_output)
+            loss = loss + extra_loss
 
         return output_batch, loss
 

@@ -314,6 +314,8 @@ class VideoDataset(Dataset):
             data["ai_caption"] = caption
             if self.target_mask_dir is not None or self.target_prompt_suffix:
                 data["target_mask"] = self._load_target_mask(video_basename, frame_ids)
+            if self.target_prompt_suffix and "[TGT]" in self.target_prompt_suffix:
+                data["tgt_token_text"] = "[TGT]"
 
             _, _, h, w = video.shape
 

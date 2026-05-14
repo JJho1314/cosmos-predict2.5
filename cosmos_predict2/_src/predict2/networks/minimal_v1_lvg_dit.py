@@ -56,6 +56,7 @@ class MinimalV1LVGDiT(MiniTrainDIT):
         intermediate_feature_ids: Optional[List[int]] = None,
         img_context_emb: Optional[torch.Tensor] = None,
         target_mask_B_C_T_H_W: Optional[torch.Tensor] = None,
+        tgt_token_indices_B: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor | List[torch.Tensor] | Tuple[torch.Tensor, List[torch.Tensor]]:
         del kwargs
@@ -81,4 +82,5 @@ class MinimalV1LVGDiT(MiniTrainDIT):
             intermediate_feature_ids=intermediate_feature_ids,
             img_context_emb=img_context_emb,
             target_mask_B_C_T_H_W=target_mask_B_C_T_H_W if self.concat_target_mask else None,
+            tgt_token_indices_B=tgt_token_indices_B,
         )

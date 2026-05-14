@@ -204,21 +204,21 @@ _video_dataset_droid_success_train_tavid_mask = L(VideoDataset)(
     num_frames=33,
     video_size=_DROID_VIDEO_SIZE_480,
     target_mask_dir="auto",
-    target_prompt_suffix="The robot interacts with the target object.",
+    target_prompt_suffix="The robot interacts with the [TGT] target object.",
 )
 _video_dataset_droid_success_test_tavid_mask = L(VideoDataset)(
     dataset_dir=_DATASET_DIR_DROID_SUCCESS_TEST_480,
     num_frames=33,
     video_size=_DROID_VIDEO_SIZE_480,
     target_mask_dir="auto",
-    target_prompt_suffix="The robot interacts with the target object.",
+    target_prompt_suffix="The robot interacts with the [TGT] target object.",
 )
 _video_dataset_droid_failure_all_tavid_mask = L(VideoDataset)(
     dataset_dir=_DATASET_DIR_DROID_FAILURE_CLEAN_480,
     num_frames=33,
     video_size=_DROID_VIDEO_SIZE_480,
     target_mask_dir="auto",
-    target_prompt_suffix="The robot interacts with the target object.",
+    target_prompt_suffix="The robot interacts with the [TGT] target object.",
 )
 _video_dataset_droid_success_failure = L(ConcatDataset)(
     datasets=[
@@ -484,7 +484,12 @@ predict2_video2world_training_2b_droid_success_failure_tavid_mask = dict(
     model=dict(
         config=dict(
             target_mask_condition_frames_only=True,
-            net=dict(concat_target_mask=True),
+            target_attention_loss_weight=0.05,
+            net=dict(
+                concat_target_mask=True,
+                tavid_attn_alignment_blocks=[8, 12, 16, 20],
+                tavid_attn_query_chunk_size=1024,
+            ),
         ),
     ),
 )

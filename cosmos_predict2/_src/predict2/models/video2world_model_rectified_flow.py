@@ -53,6 +53,8 @@ class Video2WorldModelRectifiedFlowConfig(Text2WorldModelRectifiedFlowConfig):
     denoise_replace_gt_frames: bool = True  # Whether to denoise the ground truth frames
     conditional_frames_probs: Optional[Dict[int, float]] = None  # Probability distribution for conditional frames
     target_mask_condition_frames_only: bool = True  # Keep target mask on video-conditioning frames, TAViD-style.
+    target_attention_loss_weight: float = 0.0
+    target_attention_loss_eps: float = 1e-6
 
     def __attrs_post_init__(self):
         super().__attrs_post_init__()
@@ -81,7 +83,41 @@ class Video2WorldModelRectifiedFlow(Text2WorldModelRectifiedFlow):
             if self.config.target_mask_condition_frames_only:
                 target_mask = target_mask * condition.condition_video_input_mask_B_C_T_H_W.type_as(target_mask)
             condition = condition.set_target_mask(target_mask)
+        tgt_token_indices = data_batch.get("tgt_token_indices", None)
+        if tgt_token_indices is not None:
+            condition = condition.set_tgt_token_indices(tgt_token_indices.to(device=latent_state.device, dtype=torch.long))
         return raw_state, latent_state, condition
+
+    def compute_extra_training_loss(self, condition: Video2WorldCondition) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        if self.config.target_attention_loss_weight <= 0:
+            return {}, torch.zeros((), **self.tensor_kwargs_fp32)
+        target_attn_maps = getattr(self.net, "tavid_target_attn_maps", [])
+        target_mask = getattr(self.net, "tavid_target_mask_B_T_H_W", None)
+        if not target_attn_maps or target_mask is None:
+            return {}, torch.zeros((), **self.tensor_kwargs_fp32)
+        if condition.tgt_token_indices_B is not None and not bool((condition.tgt_token_indices_B >= 0).any()):
+            return {}, torch.zeros((), **self.tensor_kwargs_fp32)
+
+        target_mask = target_mask.float()
+        mask_flat = rearrange(target_mask, "b t h w -> b (t h w)")
+        valid = mask_flat.sum(dim=1) > 0
+        if not bool(valid.any()):
+            return {}, torch.zeros((), **self.tensor_kwargs_fp32)
+
+        eps = self.config.target_attention_loss_eps
+        mask_dist = mask_flat / (mask_flat.sum(dim=1, keepdim=True) + eps)
+        losses = []
+        for attn_map in target_attn_maps:
+            attn_flat = rearrange(attn_map.float(), "b t h w -> b (t h w)")
+            attn_dist = attn_flat / (attn_flat.sum(dim=1, keepdim=True) + eps)
+            per_sample = ((attn_dist - mask_dist) ** 2).mean(dim=1)
+            losses.append(per_sample[valid].mean())
+        align_loss = torch.stack(losses).mean()
+        weighted_loss = align_loss * self.config.target_attention_loss_weight
+        return {
+            "target_attention_loss": align_loss.detach(),
+            "target_attention_loss_weighted": weighted_loss.detach(),
+        }, weighted_loss
 
     def denoise(
         self,
