@@ -34,7 +34,6 @@ class ImaginaireModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.parallel_dims = None
 
     def init_optimizer_scheduler(
         self, optimizer_config: LazyDict, scheduler_config: LazyDict

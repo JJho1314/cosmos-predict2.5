@@ -37,9 +37,6 @@ DEFAULT_CAMERA_VIEW_CONFIGS = {
 def register_multiview_dataloader() -> None:
     """Register multiview video dataloader configurations."""
 
-    cs = ConfigStore.instance()
-
-    # alpamayo
     datasets = ["alpamayo_dec2024"]
     object_stores = ["gcs", "s3"]
     resolutions = [
@@ -57,6 +54,7 @@ def register_multiview_dataloader() -> None:
         ("61frames", 61),
         ("93frames", 93),
     ]
+    cs = ConfigStore.instance()
     cs.store(
         group="data_val",
         package="dataloader_val",

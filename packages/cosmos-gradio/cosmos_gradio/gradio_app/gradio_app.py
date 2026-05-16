@@ -18,9 +18,9 @@ import json
 from loguru import logger as log
 from pyparsing import Callable
 
-from cosmos_gradio.gradio_app.util import get_output_folder
-from cosmos_gradio.model_ipc.command_ipc import StatusData, WorkerException
+from cosmos_gradio.gradio_app.util import get_output_folder, get_outputs
 from cosmos_gradio.model_ipc.model_server import ModelServer
+from cosmos_gradio.model_ipc.model_worker import create_worker_pipeline
 
 
 class GradioApp:
@@ -38,79 +38,52 @@ class GradioApp:
         factory_module: str,
         factory_function: str,
         output_dir: str,
-        default_request: dict,
     ):
-        # Print the full path of this module
-        module_path = __file__
-        log.info(f"GradioApp module full path: {module_path}")
-
         self.validator = validator
-        self.pipeline = ModelServer.create_server(num_gpus, factory_module, factory_function)
+        if num_gpus == 1:
+            self.pipeline = create_worker_pipeline(factory_module, factory_function)
+        else:
+            self.pipeline = ModelServer(num_gpus, factory_module, factory_function)
         self.output_dir = output_dir
-        self.default_request = default_request
 
-    def generate_video(
+    def infer(
         self,
         request_text,
-    ) -> tuple[str | None, str]:
-        """
-        generation function for the gradio UI with input/output matching UI elements.
-        Note: at this point we catch exceptions and return a status message to the UI.
-        """
+    ):
+        output_folder = get_output_folder(self.output_dir)
+
         try:
-            log.info(f"Model parameters: {request_text}")
-            args_dict = json.loads(request_text)
+            args_dict_unvalidated = json.loads(request_text)
         except json.JSONDecodeError as e:
             return (
                 None,
                 f"Error parsing request JSON: {e}\nPlease ensure your request is valid JSON.",
             )
-        output_folder = get_output_folder(self.output_dir)
-        status = self._infer_json(args_dict, output_folder)
 
-        output_file = None
-        status_message = f"{status.model_dump_json(indent=4)}"
-        output_files = status.result.get("videos", None)
-        if output_files is None:
-            output_files = status.result.get("images", None)
-        if output_files and len(output_files) > 0:
-            output_file = output_files[0]
-
-        return output_file, status_message
-
-    def generate(self, request_dict: dict) -> dict:
-        output_folder = get_output_folder(self.output_dir)
-        status_data = self._infer_json(request_dict, output_folder)
-        return status_data.model_dump()
-
-    def generate_default_request(self) -> dict:
-        status_data = self._infer_json(self.default_request, get_output_folder(self.output_dir))
-        return status_data.model_dump()
-
-    def _infer_json(self, request_dict: dict, output_folder: str) -> StatusData:
         try:
-            log.info(f"Model parameters: {request_dict}")
+            log.info(f"Model parameters: {json.dumps(args_dict_unvalidated, indent=4)}")
 
-            args_dict = self.validator(request_dict)
+            args_dict = self.validator(args_dict_unvalidated)
             args_dict["output_dir"] = output_folder
 
-            return self.pipeline.infer(args_dict)
-        except WorkerException as e:
-            log.error(f"Error during inference: {e}")
+            status = self.pipeline.infer(args_dict)
 
-            if e.status == "timeout":
-                # we don't know what happened to the workers
-                # out time-out might just be to short
-                # or worker died or hangs
-                # time to attempt restart the workers
-                log.error("Workers timed out. Restarting workers...")
-                self.pipeline.stop_workers()
-                self.pipeline.start_workers()
-                return StatusData(
-                    status="Worker not repsonsive. Restarted all workers.", result={}, rank=0, request_id=0
-                )
+            output_file = None
+            if status:
+                status_message = f"Result json: {json.dumps(status, indent=4)}"
+                # the IPC layer wraps the model result
+                # for single GPU we get the model result directly w/o IPC wrapping
+                result = status.get("result", status)
+                output_files = result.get("videos", None)
+                if output_files is None:
+                    output_files = result.get("images", None)
+                if output_files and len(output_files) > 0:
+                    output_file = output_files[0]
             else:
-                return StatusData(status=str(e), result={}, rank=0, request_id=0)
+                output_file, status_message = get_outputs(output_folder)
+
+            return output_file, status_message
+
         except Exception as e:
             log.error(f"Error during inference: {e}")
-            return StatusData(status=str(e), result={}, rank=0, request_id=0)
+            return None, f"Error: {e}"

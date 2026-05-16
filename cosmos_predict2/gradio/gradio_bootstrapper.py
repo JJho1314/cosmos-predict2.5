@@ -17,7 +17,8 @@ from pathlib import Path
 
 import torch
 from cosmos_gradio.deployment_env import DeploymentEnv
-from cosmos_gradio.gradio_app.gradio_server import launch_gradio_server
+from cosmos_gradio.gradio_app.gradio_app import GradioApp
+from cosmos_gradio.gradio_app.gradio_ui import create_gradio_UI
 
 from cosmos_predict2._src.imaginaire.utils import log
 from cosmos_predict2.config import InferenceArguments, SetupArguments
@@ -112,16 +113,29 @@ if __name__ == "__main__":
         "multiview": validate_multiview,
     }
 
-    launch_gradio_server(
+    app = GradioApp(
+        num_gpus=global_env.num_gpus,
+        validator=validators[global_env.model_name],
         factory_module=factory_module[global_env.model_name],
         factory_function=factory_function[global_env.model_name],
-        validator=validators[global_env.model_name],
-        num_gpus=global_env.num_gpus,
         output_dir=global_env.output_dir,
-        uploads_dir=global_env.uploads_dir,
-        log_file=global_env.log_file,
+    )
+
+    interface = create_gradio_UI(
+        app.infer,
+        header=model_cfg.header[global_env.model_name] + " " + global_env.model_size,
         default_request=model_cfg.default_request[global_env.model_name],
-        header=model_cfg.header[global_env.model_name],
         help_text=model_cfg.help_text[global_env.model_name],
+        uploads_dir=global_env.uploads_dir,
+        output_dir=global_env.output_dir,
+        log_file=global_env.log_file,
+    )
+
+    interface.launch(
+        server_name="0.0.0.0",
+        server_port=8080,
+        share=False,
+        debug=True,
+        max_file_size="500MB",
         allowed_paths=global_env.allowed_paths,
     )

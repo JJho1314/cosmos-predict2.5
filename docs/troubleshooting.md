@@ -4,15 +4,6 @@
 
 Also, check GitHub Issues for the [repository](https://github.com/orgs/nvidia-cosmos/repositories).
 
-### Changing the cache directory
-We download packages and checkpoints to the home directory by default. To change this, you can set the following variables.
-This is also needed if you get `No space left on device` errors when setting up or downloading checkpoints.
-```shell
-export UV_CACHE_DIR=<new_dir>/.cache
-export PIP_CACHE_DIR=<new_dir>/.cache
-export HF_HOME=<new_dir>/checkpoints
-```
-
 ### Missing Python.h
 
 Error message: `fatal error: Python.h: No such file or directory`
@@ -41,15 +32,7 @@ Check driver compatibility:
 nvidia-smi | grep "CUDA Version:"
 ```
 
-### PYTHONPATH conflicts in NVIDIA containers
-
-When using `nvcr.io/nvidia/pytorch:25.xx-py3` containers, you will need to unset `PYTHONPATH` to be compatible with Python 3.10:
-
-```shell
-unset PYTHONPATH
-```
-
-### Out of Memory (OOM) errors
+### Out of Memory (OOM) errors**
 
 **Fix:** Use 2B models instead of 14B, multi-GPU, or reduce batch size/resolution
 

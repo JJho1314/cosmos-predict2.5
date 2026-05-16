@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import psutil
@@ -32,7 +32,7 @@ from cosmos_predict2._src.imaginaire.utils.easy_io import easy_io
 def log_prof_data(
     data_list: List[Dict[str, Any]],
     iteration: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> Tuple[pd.DataFrame]:
     # Create a table to log data with rank information
     columns = ["iteration", "rank"] + list(data_list[0].keys())
     data = []
@@ -62,12 +62,9 @@ def log_prof_data(
     summary_df = pd.DataFrame({"Avg": avg_values, "Max": max_values, "Min": min_values})
 
     if wandb.run:
-        try:
-            # Log the table
-            table = wandb.Table(dataframe=df)
-            wandb.log({"DeviceMonitor/prof_data": table}, step=iteration)
-        except Exception as e:
-            log.warning(f"Failed to log WandB table: {e}. Skipping table logging.")
+        # Log the table
+        table = wandb.Table(dataframe=df)
+        wandb.log({"DeviceMonitor/prof_data": table}, step=iteration)
 
         # Log summary statistics
         summary = {}
@@ -76,10 +73,7 @@ def log_prof_data(
             summary[f"DeviceMonitor/max_{key}"] = max_values[key]
             summary[f"DeviceMonitor/avg_{key}"] = avg_values[key]
 
-        try:
-            wandb.log(summary, step=iteration)
-        except Exception as e:
-            log.warning(f"Failed to log WandB summary: {e}. Skipping summary logging.")
+        wandb.log(summary, step=iteration)
     return df, summary_df
 
 
@@ -189,10 +183,7 @@ class DeviceMonitor(EveryN):
                 memory_stats = torch.cuda.memory_stats()
                 if wandb.run:
                     wandb_memory_info = {f"mem/{key}": memory_stats[key] for key in memory_stats.keys()}
-                    try:
-                        wandb.log(wandb_memory_info, step=iteration)
-                    except Exception as e:
-                        log.warning(f"Failed to log WandB memory info: {e}. Skipping memory info logging.")
+                    wandb.log(wandb_memory_info, step=iteration)
                 if self.save_s3:
                     global_step = iteration // self.step_size
                     should_run = global_step % self.upload_every_n == 0

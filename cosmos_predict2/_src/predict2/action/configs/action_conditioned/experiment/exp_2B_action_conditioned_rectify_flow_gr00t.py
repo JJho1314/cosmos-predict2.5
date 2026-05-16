@@ -21,6 +21,7 @@ from hydra.core.config_store import ConfigStore
 
 from cosmos_predict2._src.imaginaire.lazy_config import LazyCall as L
 from cosmos_predict2._src.imaginaire.lazy_config import LazyDict
+from cosmos_predict2._src.imaginaire.utils.checkpoint_db import get_checkpoint_path
 from cosmos_predict2._src.predict2.datasets.cached_replay_dataloader import (
     duplicate_batches,
     duplicate_batches_random,
@@ -699,7 +700,7 @@ AC_CHUNK_MULTI_VIEW_2B_GR00T_GR1_CUSTOMIZED_13FRAME_FULL_16NODES = LazyDict(
 )
 
 default_experiment = DEFAULT_CHECKPOINT.experiment
-load_path = DEFAULT_CHECKPOINT.s3.uri
+load_path = get_checkpoint_path(DEFAULT_CHECKPOINT.s3.uri)
 ac_reason_embeddings_rectified_flow_2b_oss = LazyDict(
     dict(
         defaults=[

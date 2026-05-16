@@ -14,8 +14,7 @@
 # limitations under the License.
 
 import json
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from cosmos_predict2.config import InferenceArguments
 from cosmos_predict2.gradio.sample_data import (
@@ -28,26 +27,20 @@ from cosmos_predict2.multiview_config import MultiviewInferenceArguments
 
 @dataclass
 class ModelConfig:
-    header: dict[str, str] = field(
-        default_factory=lambda: {
-            "video2world": "Cosmos-Predict2.5 Video2World",
-            "distilled": "Cosmos-Predict2.5 Distilled",
-            "multiview": "Cosmos-Predict2.5 Multiview",
-        }
-    )
+    header = {
+        "video2world": "Cosmos-Predict2.5 Video2World",
+        "distilled": "Cosmos-Predict2.5 Distilled",
+        "multiview": "Cosmos-Predict2.5 Multiview",
+    }
 
-    help_text: dict[str, str] = field(
-        default_factory=lambda: {
-            "video2world": f"```json\n{json.dumps(InferenceArguments.model_json_schema(), indent=2)}\n```",
-            "distilled": f"```json\n{json.dumps(InferenceArguments.model_json_schema(), indent=2)}\n```",
-            "multiview": f"```json\n{json.dumps(MultiviewInferenceArguments.model_json_schema(), indent=2)}\n```",
-        }
-    )
+    help_text = {
+        "video2world": f"```json\n{json.dumps(InferenceArguments.model_json_schema(), indent=2)}\n```",
+        "distilled": f"```json\n{json.dumps(InferenceArguments.model_json_schema(), indent=2)}\n```",
+        "multiview": f"```json\n{json.dumps(MultiviewInferenceArguments.model_json_schema(), indent=2)}\n```",
+    }
 
-    default_request: dict[str, dict[str, Any]] = field(
-        default_factory=lambda: {
-            "video2world": sample_request_image2world,
-            "distilled": sample_request_distilled,
-            "multiview": sample_request_multiview,
-        }
-    )
+    default_request = {
+        "video2world": json.dumps(sample_request_image2world, indent=2),
+        "distilled": json.dumps(sample_request_distilled, indent=2),
+        "multiview": json.dumps(sample_request_multiview, indent=2),
+    }

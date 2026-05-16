@@ -41,13 +41,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash 
 
 WORKDIR /workspace
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=docker/nightly-requirements.txt,target=requirements.txt \
     --mount=type=bind,source=packages,target=packages \
-    uv pip install --system --break-system-packages -r requirements.txt
-
-RUN --mount=type=bind,source=packages,target=packages \
-    pip install --no-deps packages/*
+    pip install -r requirements.txt
 
 ENTRYPOINT ["/workspace/docker/nightly-entrypoint.sh"]
 

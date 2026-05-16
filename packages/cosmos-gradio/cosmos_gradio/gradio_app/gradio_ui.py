@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 from datetime import datetime
 
 import gradio as gr
@@ -23,9 +22,7 @@ from cosmos_gradio.gradio_app.gradio_log_file_viewer import log_file_viewer
 from cosmos_gradio.gradio_app.util import get_git_info
 
 
-def create_gradio_UI(
-    infer_func, header: str, default_request: dict, help_text: str, uploads_dir: str, output_dir: str, log_file: str
-):
+def create_gradio_UI(infer_func, header, default_request, help_text, uploads_dir, output_dir, log_file):
     with gr.Blocks(title=header, theme=gr.themes.Soft()) as interface:
         gr.Markdown(f"# {header}")
         gr.Markdown(f"instance created {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: {get_git_info()}")
@@ -39,12 +36,11 @@ def create_gradio_UI(
 
         with gr.Row():
             with gr.Column(scale=1):
-                # Single request input field (editable)
-                request_input = gr.Code(
+                # Single request input field
+                request_input = gr.Textbox(
                     label="Request (JSON)",
-                    value=json.dumps(default_request, indent=2),
+                    value=default_request,
                     lines=20,
-                    language="json",
                     interactive=True,
                 )
 
@@ -60,16 +56,11 @@ def create_gradio_UI(
 
         log_file_viewer(log_file=log_file, num_lines=100, update_interval=1)
 
-        # UI endpoint
         generate_btn.click(
-            fn=infer_func.generate_video,
+            fn=infer_func,
             inputs=[request_input],
             outputs=[output_video, status_text],
             api_name="generate_video",
         )
-
-        # Hidden API-only endpoint that takes JSON directly
-        gr.api(fn=infer_func.generate, api_name="generate")
-        gr.api(fn=infer_func.generate_default_request, api_name="generate_default_request")
 
     return interface

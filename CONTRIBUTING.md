@@ -2,7 +2,7 @@
 
 We'd love to receive your patches and contributions. Please keep your PRs as draft until such time that you would like us to review them.
 
-## Setup
+## Test
 
 Install system dependencies:
 
@@ -12,14 +12,6 @@ Install system dependencies:
 uv tool install -U rust-just
 ```
 
-To see all available commands, run
-
-```shell
-just
-```
-
-## Test
-
 Run linting and formatting:
 
 ```shell
@@ -28,19 +20,25 @@ just lint
 
 This will also run auto-fixes and linting. We recommend that you commit your changes first.
 
-Run level 0 tests:
+Run all tests:
 
 ```shell
-just test
+just test-level-<level>
 ```
 
-Test levels (`--levels`):
+Test levels:
 
 0. Smoke tests. Requires >=1 GPU.
 1. Partial E2E tests. Requires >= 8 GPUs.
 2. Full E2E tests. Requires >= 8 GPUs.
 
 Test outputs are saved to `outputs/pytest/<test_name>`. To monitor a test, open `console.log`/`debug.log`.
+
+To see what tests are currently running and their output directories:
+
+```shell
+ps -aux | grep pytest
+```
 
 List all tests:
 
@@ -57,11 +55,10 @@ just test-single <test_name> [--pdb]
 just test-single "tests/assets_test.py::test_inference_assets[base]"
 ```
 
-Generate coverage report:
+To see all available commands, run
 
 ```shell
-just test-coverage
-just run coverage html
+just
 ```
 
 ## Code Reviews

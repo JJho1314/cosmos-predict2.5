@@ -36,6 +36,7 @@ import torch.amp as amp
 import transformer_engine as te
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
+from packaging.version import Version
 from torch import nn
 from torch.nn import functional as F
 from torch.distributed import ProcessGroup, get_process_group_ranks
@@ -49,9 +50,9 @@ except ImportError:
 
 from torchvision import transforms
 
-try:
+if Version(te.__version__) >= Version("2.8.0"):
     from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
-except ImportError:
+else:
     from transformer_engine.pytorch.attention import apply_rotary_pos_emb
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
@@ -916,7 +917,7 @@ class Timesteps(nn.Module):
     def forward(self, timesteps_B_T):
         assert timesteps_B_T.ndim == 2, f"Expected 2D input, got {timesteps_B_T.ndim}"
         # wan need emb to be in fp32
-        in_dtype = timesteps_B_T.dtype
+        in_dype = timesteps_B_T.dtype
         timesteps = timesteps_B_T.flatten().float()
         half_dim = self.num_channels // 2
         exponent = -math.log(10000) * torch.arange(half_dim, dtype=torch.float32, device=timesteps.device)
@@ -929,7 +930,7 @@ class Timesteps(nn.Module):
         cos_emb = torch.cos(emb)
         emb = torch.cat([cos_emb, sin_emb], dim=-1)
 
-        return rearrange(emb.to(dtype=in_dtype), "(b t) d -> b t d", b=timesteps_B_T.shape[0], t=timesteps_B_T.shape[1])
+        return rearrange(emb.to(dtype=in_dype), "(b t) d -> b t d", b=timesteps_B_T.shape[0], t=timesteps_B_T.shape[1])
 
 
 class TimestepEmbedding(nn.Module):
@@ -1941,17 +1942,17 @@ class MiniTrainDIT(WeightTrainingStat):
 
         return self
 
-    def fully_shard(self, mesh, **fsdp_kwargs):
+    def fully_shard(self, mesh):
         for i, block in enumerate(self.blocks):
             reshard_after_forward = i < len(self.blocks) - 1
-            fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward, **fsdp_kwargs)
+            fully_shard(block, mesh=mesh, reshard_after_forward=reshard_after_forward)
 
-        fully_shard(self.final_layer, mesh=mesh, reshard_after_forward=True, **fsdp_kwargs)
+        fully_shard(self.final_layer, mesh=mesh, reshard_after_forward=True)
         if self.extra_per_block_abs_pos_emb:
-            fully_shard(self.extra_pos_embedder, mesh=mesh, reshard_after_forward=True, **fsdp_kwargs)
-        fully_shard(self.t_embedder, mesh=mesh, reshard_after_forward=False, **fsdp_kwargs)
+            fully_shard(self.extra_pos_embedder, mesh=mesh, reshard_after_forward=True)
+        fully_shard(self.t_embedder, mesh=mesh, reshard_after_forward=False)
         if self.extra_image_context_dim is not None:
-            fully_shard(self.img_context_proj, mesh=mesh, reshard_after_forward=False, **fsdp_kwargs)
+            fully_shard(self.img_context_proj, mesh=mesh, reshard_after_forward=False)
 
     def disable_context_parallel(self):
         # pos_embedder

@@ -53,8 +53,7 @@ input_root/
 
 import math
 import os
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 import torchvision
@@ -64,9 +63,6 @@ from PIL import Image
 from cosmos_predict2._src.imaginaire.flags import INTERNAL
 from cosmos_predict2._src.imaginaire.utils import distributed, log
 from cosmos_predict2._src.imaginaire.utils.easy_io import easy_io
-from cosmos_predict2._src.interactive.utils.model_loader import (
-    load_model_from_checkpoint as load_distilled_model_from_checkpoint,
-)
 from cosmos_predict2._src.predict2.inference.get_t5_emb import get_text_embedding
 from cosmos_predict2._src.predict2.utils.model_loader import load_model_from_checkpoint
 
@@ -113,8 +109,6 @@ def _resize_mask_to(mask: torch.Tensor, num_frames: int, height: int, width: int
     if (H, W) != (height, width):
         m = torch.nn.functional.interpolate(m, size=(num_frames, height, width), mode="nearest")
     return (m > 0.5).float()
-
-
 def resize_input(video: torch.Tensor, resolution: list[int]):
     r"""
     Resizes and crops the input video tensor while preserving aspect ratio.
@@ -305,14 +299,6 @@ class Video2WorldInference:
             ckpt_path (str): Path to the model checkpoint (local or S3).
             s3_credential_path (str): Path to S3 credentials file (if loading from S3).
             context_parallel_size (int): Number of GPUs for context parallelism.
-            config_file (str): Path to the config file.
-            experiment_opts (list[str]): List of experiment options.
-            offload_diffusion_model (bool): Whether to offload the diffusion model to CPU.
-            offload_text_encoder (bool): Whether to offload the text encoder to CPU.
-            offload_tokenizer (bool): Whether to offload the tokenizer to CPU.
-
-        Returns:
-            None
         """
         self.experiment_name = experiment_name
         self.ckpt_path = ckpt_path
@@ -342,23 +328,14 @@ class Video2WorldInference:
         if self.offload_diffusion_model:
             os.environ["COSMOS_PREDICT2_OFFLOAD_DIT"] = "1"
 
-        if config_file and "interactive" in config_file:
-            model, config = load_distilled_model_from_checkpoint(
-                experiment_name=self.experiment_name,
-                s3_checkpoint_dir=self.ckpt_path,
-                config_file=config_file,
-                load_ema_to_reg=True,
-                experiment_opts=experiment_opts,
-            )
-        else:
-            model, config = load_model_from_checkpoint(
-                experiment_name=self.experiment_name,
-                s3_checkpoint_dir=self.ckpt_path,
-                config_file=config_file,
-                load_ema_to_reg=True,
-                experiment_opts=experiment_opts,
-                to_device=model_device,
-            )
+        model, config = load_model_from_checkpoint(
+            experiment_name=self.experiment_name,
+            s3_checkpoint_dir=self.ckpt_path,
+            config_file=config_file,
+            load_ema_to_reg=True,
+            experiment_opts=experiment_opts,
+            to_device=model_device,
+        )
 
         # By default, everything will be constructed directly on the GPU (except DiT)
         # Handle offloading options at inference entry
@@ -428,7 +405,7 @@ class Video2WorldInference:
         num_conditional_frames: int = 1,
         negative_prompt: str = _DEFAULT_NEGATIVE_PROMPT,
         use_neg_prompt: bool = True,
-        camera: CameraConditionInputs | None = None,
+        camera: torch.Tensor | None = None,
         action: torch.Tensor | None = None,
         target_mask: torch.Tensor | None = None,
     ):
@@ -445,7 +422,7 @@ class Video2WorldInference:
             num_conditional_frames (int): Number of conditional frames to use.
             negative_prompt (str, optional): Custom negative prompt.
             use_neg_prompt (bool, optional): Whether to include negative prompt embeddings. Defaults to True.
-            camera (CameraConditionInputs | None): Optional typed camera metadata container.
+            camera: (torch.Tensor, optional) Target camera extrinsics and intrinsics for the K output videos, must be provided for camera conditioned model.
             action: (torch.Tensor, optional) Target robot action for the K output videos, must be provided for action conditioned model.
 
         Returns:
@@ -456,6 +433,7 @@ class Video2WorldInference:
         data_batch = {
             "dataset_name": "video_data",
             "video": video,
+            "camera": camera,
             "action": action.unsqueeze(0) if action is not None else None,
             "fps": torch.randint(16, 32, (self.batch_size,)).float(),  # Random FPS (might be used by model)
             "padding_mask": torch.zeros(self.batch_size, 1, H, W),  # Padding mask (assumed no padding here)
@@ -515,7 +493,7 @@ class Video2WorldInference:
         resolution: str = "192,320",
         seed: int = 1,
         negative_prompt: str = _DEFAULT_NEGATIVE_PROMPT,
-        camera: CameraConditionInputs | None = None,
+        camera: torch.Tensor | None = None,
         action: torch.Tensor | None = None,
         num_steps: int = 35,
         target_mask: torch.Tensor | None = None,
@@ -535,7 +513,7 @@ class Video2WorldInference:
             resolution: Target video resolution in "H,W" format. Defaults to "192,320".
             seed: Random seed for reproducibility. Defaults to 1.
             negative_prompt: Custom negative prompt. Defaults to the predefined default negative prompt.
-            camera: CameraConditionInputs containing extrinsics, intrinsics, and optional image size metadata.
+            camera: Target camera extrinsics and intrinsics for the K output videos. Must be provided if model is camera conditioned.
             action: Target robot action for the K output videos. Must be provided if model is action conditioned.
             num_steps: Number of generation steps. Defaults to 35.
             offload_diffusion_model: If True, offload diffusion model to CPU to save GPU memory. Defaults to False.
@@ -647,7 +625,7 @@ class Video2WorldInference:
         # Generate latent samples using the diffusion model
         # Video should be of shape torch.Size([1, 3, 93, 192, 320]) # Note: Shape check comment
         log.info("[Memory Optimization] Starting latent sample generation")
-        if getattr(self.model.config, "use_lora", False):
+        if self.model.config.use_lora:
             generate_samples = self.model.generate_samples_from_batch_lora
         else:
             generate_samples = self.model.generate_samples_from_batch
@@ -736,8 +714,8 @@ class Video2WorldInference:
             prompt: The text prompt describing the desired video content/style.
             input_path: Path to the input image or video file or a torch.Tensor.
             num_output_frames: Total number of frames to generate in the final output.
-            chunk_size: Number of pixel frames per chunk (model's native capacity).
-            chunk_overlap: Number of overlapping pixel frames between consecutive chunks.
+            chunk_size: Number of frames per chunk (model's native capacity).
+            chunk_overlap: Number of overlapping frames between chunks.
             guidance: Classifier-free guidance scale.
             num_latent_conditional_frames: Number of latent conditional frames.
             resolution: Target video resolution in "H,W" format.
@@ -886,11 +864,11 @@ class Video2WorldInference:
                 ).to(chunk_input.dtype)
                 chunk_input = torch.cat([chunk_input, padding], dim=2)
 
-            # Determine num_latent_conditional for the model (latent space) for this chunk.
+            # Determine num_conditional_frames for this chunk
             if chunk_idx == 0:
-                chunk_latent_conditional = num_latent_conditional_frames
+                chunk_num_conditional = num_latent_conditional_frames
             else:
-                chunk_latent_conditional = self.model.tokenizer.get_latent_num_frames(chunk_overlap)
+                chunk_num_conditional = chunk_overlap
 
             # Per-frame TAViD target mask: slice the full mask track to this
             # chunk's frame window so every chunk gets dense mask guidance
@@ -929,7 +907,7 @@ class Video2WorldInference:
                 input_path=chunk_input,
                 guidance=guidance,
                 num_video_frames=model_required_frames,
-                num_latent_conditional_frames=chunk_latent_conditional,
+                num_latent_conditional_frames=chunk_num_conditional,
                 resolution=resolution,
                 seed=seed + chunk_idx,
                 negative_prompt=negative_prompt,
@@ -946,15 +924,19 @@ class Video2WorldInference:
             if chunk_idx == 0:
                 generated_chunks.append(chunk_video)
             else:
+                # Remove overlap frames from the beginning
                 generated_chunks.append(chunk_video[:, :, chunk_overlap:, :, :])
 
             # Update input for next iteration using generated frames
             if chunk_idx < num_chunks - 1:
                 # Convert generated chunk from [-1, 1] to [0, 255] uint8 range
                 chunk_video_uint8 = ((chunk_video / 2.0 + 0.5).clamp(0.0, 1.0) * 255.0).to(torch.uint8)
-                update_start = start_frame + chunk_overlap
+                # Update the input video with generated frames for conditioning next chunk
+                update_start = start_frame + chunk_num_conditional
                 update_end = end_frame
-                current_input_video[:, :, update_start:update_end, :, :] = chunk_video_uint8[:, :, chunk_overlap:, :, :]
+                current_input_video[:, :, update_start:update_end, :, :] = chunk_video_uint8[
+                    :, :, chunk_num_conditional:, :, :
+                ]
 
         # Concatenate all chunks along time dimension
         final_video = torch.cat(generated_chunks, dim=2)

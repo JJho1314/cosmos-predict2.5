@@ -22,6 +22,7 @@ Frontend APIs
 
 from torch import Tensor
 
+from cosmos_predict2._src.imaginaire.attention.cudnn.checks import cudnn_attention_check
 from cosmos_predict2._src.imaginaire.attention.flash2.checks import flash2_attention_check
 from cosmos_predict2._src.imaginaire.attention.flash3.checks import flash3_attention_check
 from cosmos_predict2._src.imaginaire.attention.masks import CausalType
@@ -33,6 +34,7 @@ from cosmos_predict2._src.imaginaire.attention.utils import get_arch_tag
 from cosmos_predict2._src.imaginaire.attention.utils import safe_log as log
 
 BACKEND_CHECK_MAP = {
+    "cudnn": cudnn_attention_check,
     "natten": natten_attention_check,
     "flash2": flash2_attention_check,
     "flash3": flash3_attention_check,
@@ -123,12 +125,15 @@ def get_backend_list(arch_tag: int) -> list[str]:
     if arch_tag == 90:
         return [
             "flash3",
+            "cudnn",
             "natten",
             "flash2",
         ]
 
     if arch_tag in [100, 103]:
         return [
+            # "flash4",
+            "cudnn",
             "natten",
             "flash2",
         ]
@@ -136,6 +141,7 @@ def get_backend_list(arch_tag: int) -> list[str]:
     if arch_tag >= 80:
         return [
             "flash2",
+            "cudnn",
             "natten",
         ]
 

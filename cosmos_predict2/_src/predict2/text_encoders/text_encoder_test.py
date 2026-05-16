@@ -26,14 +26,9 @@ import unittest
 import pytest
 import torch
 
-try:
-    from cosmos_predict2._src.imaginaire.utils import log
-    from cosmos_predict2._src.imaginaire.utils.embedding_concat_strategy import EmbeddingConcatStrategy
-    from cosmos_predict2._src.predict2.text_encoders.text_encoder import TextEncoder, TextEncoderConfig
-except AssertionError as e:
-    if "flash_attn" in str(e):
-        pytest.skip(reason="OWNER_TO_CHECK_LOGIC: flash_attn_2 required", allow_module_level=True)
-    raise
+from cosmos_predict2._src.imaginaire.utils import log
+from cosmos_predict2._src.imaginaire.utils.embedding_concat_strategy import EmbeddingConcatStrategy
+from cosmos_predict2._src.predict2.text_encoders.text_encoder import TextEncoder, TextEncoderConfig
 
 
 class TestTextEncoder(unittest.TestCase):

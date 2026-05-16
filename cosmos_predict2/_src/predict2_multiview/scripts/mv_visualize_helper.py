@@ -21,7 +21,7 @@ from cosmos_predict2._src.imaginaire.utils import log
 from cosmos_predict2._src.imaginaire.visualize.video import save_img_or_video
 
 # Visualization layouts for multi-view video arrangement
-VISUALIZE_LAYOUTS_MADS = {
+VISUALIZE_LAYOUTS = {
     "width": [
         [
             "camera_rear_left_70fov",
@@ -49,19 +49,8 @@ VISUALIZE_LAYOUTS_MADS = {
     ],
 }
 
-VISUALIZE_LAYOUTS_AGIBOT = {
-    "width": [
-        ["head_color", "hand_left", "hand_right"],
-    ],
-}
 
-VISUALIZE_LAYOUTS = {
-    "mads": VISUALIZE_LAYOUTS_MADS,
-    "agibot": VISUALIZE_LAYOUTS_AGIBOT,
-}
-
-
-def arrange_video_visualization(mv_video, data_batch, method="width", dataset="mads"):
+def arrange_video_visualization(mv_video, data_batch, method="width"):
     """
     Rearrange multi-view video based on specified layout method.
 
@@ -84,9 +73,9 @@ def arrange_video_visualization(mv_video, data_batch, method="width", dataset="m
     if method == "time":
         return mv_video
 
-    if method not in VISUALIZE_LAYOUTS[dataset]:
+    if method not in VISUALIZE_LAYOUTS:
         raise ValueError(
-            f"Unsupported visualization method: {method}. Choose from {list(VISUALIZE_LAYOUTS[dataset].keys()) + ['time']}"
+            f"Unsupported visualization method: {method}. Choose from {list(VISUALIZE_LAYOUTS.keys()) + ['time']}"
         )
 
     current_view_order = data_batch["camera_keys_selection"][0]
@@ -104,7 +93,7 @@ def arrange_video_visualization(mv_video, data_batch, method="width", dataset="m
     black_view = th.zeros(B, C, T, H, W, dtype=video.dtype, device=video.device)
 
     # Get layout definition
-    layout_definition = VISUALIZE_LAYOUTS[dataset][method]
+    layout_definition = VISUALIZE_LAYOUTS[method]
 
     # Arrange video according to layout
     grid_rows = []
