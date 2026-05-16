@@ -49,6 +49,7 @@ class VideoDataset(Dataset):
         target_mask_dir: Optional[str] = None,
         target_mask_default_to_zero: bool = True,
         target_prompt_suffix: str = "",
+        target_mask_dropout_prob: float = 0.0,
     ) -> None:
         """Dataset class for loading image-text-to-video generation data.
 
@@ -74,6 +75,8 @@ class VideoDataset(Dataset):
         self.target_mask_dir = self._resolve_target_mask_dir(target_mask_dir)
         self.target_mask_default_to_zero = target_mask_default_to_zero
         self.target_prompt_suffix = target_prompt_suffix
+        self.target_mask_dropout_prob = float(target_mask_dropout_prob)
+        assert 0.0 <= self.target_mask_dropout_prob <= 1.0, "target_mask_dropout_prob must be in [0,1]"
 
         # Determine caption format and directory
         self._setup_caption_format()
@@ -307,14 +310,28 @@ class VideoDataset(Dataset):
             else:  # text format
                 caption_path = os.path.join(self.caption_dir, f"{video_basename}.txt")
                 caption = self._load_text(Path(caption_path))
-            if self.target_prompt_suffix:
+            # CFG-style joint dropout: with prob `target_mask_dropout_prob`,
+            # zero out the target mask AND drop the prompt suffix so the model
+            # also sees the base caption distribution without mask guidance.
+            drop_mask = (
+                (self.target_mask_dir is not None or self.target_prompt_suffix)
+                and self.target_mask_dropout_prob > 0
+                and random.random() < self.target_mask_dropout_prob
+            )
+
+            if self.target_prompt_suffix and not drop_mask:
                 caption = f"{caption.rstrip()} {self.target_prompt_suffix.strip()}".strip()
 
             data["video"] = video
             data["ai_caption"] = caption
             if self.target_mask_dir is not None or self.target_prompt_suffix:
-                data["target_mask"] = self._load_target_mask(video_basename, frame_ids)
-            if self.target_prompt_suffix and "[TGT]" in self.target_prompt_suffix:
+                if drop_mask:
+                    data["target_mask"] = torch.zeros(
+                        1, len(frame_ids), *self.mask_size, dtype=torch.float32
+                    )
+                else:
+                    data["target_mask"] = self._load_target_mask(video_basename, frame_ids)
+            if self.target_prompt_suffix and "[TGT]" in self.target_prompt_suffix and not drop_mask:
                 data["tgt_token_text"] = "[TGT]"
 
             _, _, h, w = video.shape

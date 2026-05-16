@@ -93,6 +93,29 @@ _dataloader_train_droid_full_tavid_mask = L(get_generic_dataloader)(
     prefetch_factor=2,
 )
 
+# v2: CFG-style joint mask + caption dropout, allow missing masks, weaker
+# attention alignment loss. Goal: keep base's long-video / no-mask behaviour
+# while learning mask guidance on the same backbone.
+_video_dataset_droid_full_tavid_mask_v2 = L(VideoDataset)(
+    dataset_dir=_DATASET_DIR_TAVID_PRIMARY,
+    num_frames=33,
+    video_size=(176, 320),
+    target_mask_dir="auto",
+    target_mask_default_to_zero=True,
+    target_prompt_suffix="The robot interacts with the [TGT] target object.",
+    target_mask_dropout_prob=0.3,
+)
+_dataloader_train_droid_full_tavid_mask_v2 = L(get_generic_dataloader)(
+    dataset=_video_dataset_droid_full_tavid_mask_v2,
+    sampler=L(get_sampler)(dataset=_video_dataset_droid_full_tavid_mask_v2),
+    batch_size=1,
+    drop_last=True,
+    num_workers=8,
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=2,
+)
+
 
 # Sanity run: load post-trained 2B, take 5 steps to verify env + data pipeline.
 predict2_video2world_training_2b_robointer_droid_sanity = dict(
@@ -576,11 +599,74 @@ predict2_video2world_training_2b_droid_success_failure_tavid_mask = dict(
 )
 
 
+# v2: full finetune on the same RoboInter DROID primary data, but with
+# CFG-style mask + caption dropout, weaker (single-layer, 0.005) attention
+# alignment, lower LR and fewer steps so the base autoregressive long-video
+# capability is preserved while learning mask-guided manipulation.
+predict2_video2world_training_2b_robointer_droid_tavid_v2 = dict(
+    defaults=[
+        f"/experiment/{DEFAULT_CHECKPOINT_2B.experiment}",
+        {"override /data_train": "mock"},
+        {"override /data_val": "mock"},
+        "_self_",
+    ],
+    dataloader_train=_dataloader_train_droid_full_tavid_mask_v2,
+    checkpoint=dict(
+        save_iter=1000,
+        load_path=get_checkpoint_path(DEFAULT_CHECKPOINT_2B.s3.uri),
+        load_from_object_store=dict(enabled=False),
+        save_to_object_store=dict(enabled=False),
+        dcp_allow_mismatched_size=True,
+    ),
+    job=dict(
+        project="cosmos_predict_v2p5",
+        group="video2world",
+        name="2b_robointer_droid_tavid_v2",
+        wandb_mode="online",
+    ),
+    optimizer=dict(lr=2 ** (-16), weight_decay=0.001),
+    scheduler=dict(
+        f_max=[0.5],
+        f_min=[0.2],
+        warm_up_steps=[500],
+        cycle_lengths=[30000],
+    ),
+    trainer=dict(
+        logging_iter=100,
+        max_iter=5000,
+        straggler_detection=dict(enabled=False),
+        callbacks=dict(
+            heart_beat=dict(save_s3=False),
+            iter_speed=dict(hit_thres=100, save_s3=False),
+            device_monitor=dict(save_s3=False),
+            every_n_sample_reg=dict(every_n=500, save_s3=False),
+            every_n_sample_ema=dict(every_n=500, save_s3=False),
+            wandb=dict(save_s3=False),
+            wandb_10x=dict(save_s3=False),
+            dataloader_speed=dict(save_s3=False),
+        ),
+    ),
+    model_parallel=dict(context_parallel_size=1),
+    model=dict(
+        config=dict(
+            target_mask_condition_frames_only=True,
+            target_attention_loss_weight=0.005,
+            net=dict(
+                concat_target_mask=True,
+                tavid_attn_alignment_blocks=[16],
+                tavid_attn_query_chunk_size=1024,
+            ),
+        ),
+    ),
+)
+
+
 cs = ConfigStore.instance()
 for _item in [
     predict2_video2world_training_2b_robointer_droid_sanity,
     predict2_video2world_training_2b_robointer_droid,
     predict2_video2world_training_2b_robointer_droid_tavid_mask,
+    predict2_video2world_training_2b_robointer_droid_tavid_v2,
     predict2_video2world_training_2b_droid_success,
     predict2_video2world_training_2b_droid_success_phase2,
     predict2_video2world_training_2b_droid_success_failure,

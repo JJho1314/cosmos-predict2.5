@@ -86,6 +86,35 @@ class CameraConditionInputs:
     metadata: dict[str, Any] | None = None
 
 
+def _resize_mask_to(mask: torch.Tensor, num_frames: int, height: int, width: int) -> torch.Tensor:
+    """Resample a TAViD-style target mask to ``[B, 1, num_frames, height, width]``.
+
+    Accepts shapes ``[H,W]``, ``[T,H,W]``, ``[1,T,H,W]`` or ``[B,1,T,H,W]``.
+    Temporal resampling is nearest-neighbour, spatial is also nearest.
+    """
+    if mask is None:
+        return None
+    m = mask.detach().float()
+    if m.ndim == 2:                          # [H,W]
+        m = m[None, None, None]              # -> [1,1,1,H,W]
+    elif m.ndim == 3:                        # [T,H,W]
+        m = m.unsqueeze(0).unsqueeze(0)      # -> [1,1,T,H,W]
+    elif m.ndim == 4:                        # [1,T,H,W] or [B,T,H,W]
+        m = m.unsqueeze(1)                   # -> [B,1,T,H,W]
+    elif m.ndim != 5:
+        raise ValueError(f"Unsupported mask shape {tuple(mask.shape)}")
+    B, _, T, H, W = m.shape
+    if T != num_frames:
+        if T == 1:
+            m = m.repeat(1, 1, num_frames, 1, 1)
+        else:
+            idx = torch.linspace(0, T - 1, num_frames, device=m.device).round().long()
+            m = m[:, :, idx]
+    if (H, W) != (height, width):
+        m = torch.nn.functional.interpolate(m, size=(num_frames, height, width), mode="nearest")
+    return (m > 0.5).float()
+
+
 def resize_input(video: torch.Tensor, resolution: list[int]):
     r"""
     Resizes and crops the input video tensor while preserving aspect ratio.
@@ -401,6 +430,7 @@ class Video2WorldInference:
         use_neg_prompt: bool = True,
         camera: CameraConditionInputs | None = None,
         action: torch.Tensor | None = None,
+        target_mask: torch.Tensor | None = None,
     ):
         """
         Prepares the input data batch for the diffusion model.
@@ -431,6 +461,9 @@ class Video2WorldInference:
             "padding_mask": torch.zeros(self.batch_size, 1, H, W),  # Padding mask (assumed no padding here)
             "num_conditional_frames": num_conditional_frames,  # Specify number of conditional frames
         }
+        if target_mask is not None:
+            # Expected shape [B, 1, T, H, W] in {0,1}. Spatial size matched to video.
+            data_batch["target_mask"] = target_mask
         if camera is not None:
             image_size = camera.image_size
             if image_size is None:
@@ -485,6 +518,7 @@ class Video2WorldInference:
         camera: CameraConditionInputs | None = None,
         action: torch.Tensor | None = None,
         num_steps: int = 35,
+        target_mask: torch.Tensor | None = None,
     ):
         """
         Generates a video based on an input image or video and text prompt.
@@ -570,6 +604,7 @@ class Video2WorldInference:
             num_conditional_frames=num_latent_conditional_frames,
             negative_prompt=negative_prompt,
             use_neg_prompt=True,
+            target_mask=target_mask,
         )
 
         mem_bytes = torch.cuda.memory_allocated(device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
@@ -692,6 +727,7 @@ class Video2WorldInference:
         camera: torch.Tensor | None = None,
         action: torch.Tensor | None = None,
         num_steps: int = 35,
+        target_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Generate video using autoregressive sliding window approach.
@@ -856,6 +892,20 @@ class Video2WorldInference:
             else:
                 chunk_latent_conditional = self.model.tokenizer.get_latent_num_frames(chunk_overlap)
 
+            # TAViD-style target mask: pass the user-supplied mask only on the
+            # first chunk (since target_mask_condition_frames_only=True keeps it
+            # active solely on the conditioning frames). Subsequent chunks see a
+            # zero mask, matching the training-time dropout distribution.
+            chunk_target_mask: torch.Tensor | None = None
+            if target_mask is not None:
+                _, _, _, mask_h, mask_w = chunk_input.shape[0], chunk_input.shape[1], chunk_input.shape[2], chunk_input.shape[3], chunk_input.shape[4]
+                if chunk_idx == 0:
+                    chunk_target_mask = _resize_mask_to(target_mask, model_required_frames, mask_h, mask_w)
+                else:
+                    chunk_target_mask = torch.zeros(
+                        target_mask.shape[0], 1, model_required_frames, mask_h, mask_w, dtype=target_mask.dtype
+                    )
+
             # Generate chunk
             chunk_video = self.generate_vid2world(
                 prompt=prompt,
@@ -869,6 +919,7 @@ class Video2WorldInference:
                 camera=camera,
                 action=action,
                 num_steps=num_steps,
+                target_mask=chunk_target_mask,
             )  # Returns (1, C, T, H, W)
 
             # Extract only the actual generated frames (remove padding)
