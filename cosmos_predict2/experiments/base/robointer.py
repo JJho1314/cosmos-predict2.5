@@ -99,16 +99,17 @@ _dataloader_train_droid_full_tavid_mask = L(get_generic_dataloader)(
 # inference pipeline supplies, and learns "fast" task dynamics.
 _video_dataset_droid_full_tavid_mask_v2 = L(VideoDataset)(
     dataset_dir=_DATASET_DIR_TAVID_PRIMARY,
-    num_frames=33,
+    num_frames=49,            # TAViD default clip length; latent_t = 13 <= base state_t=24
     video_size=(176, 320),
     target_mask_dir="auto",
     target_mask_default_to_zero=False,
     target_prompt_suffix="The robot interacts with the [TGT] target object.",
     target_mask_dropout_prob=0.0,
-    # DROID episodes are 200~480 frames @ 15 fps (~13~32 s). With stride in
-    # {2, 4, 6} a 33-frame clip covers 4.4~13 s of source, multi-scale so the
-    # model handles different task tempos. Stride 1 still kept for fine motion.
-    frame_stride_choices=[1, 2, 4, 6],
+    # DROID episodes are 200~480 frames @ 15 fps. With stride in {1, 2, 4} a
+    # 49-frame clip spans 49~193 source frames (~3~13 s), multi-scale so the
+    # model learns different task tempos. Stride 6 dropped (span 289 frames
+    # exceeds many DROID episodes).
+    frame_stride_choices=[1, 2, 4],
 )
 _dataloader_train_droid_full_tavid_mask_v2 = L(get_generic_dataloader)(
     dataset=_video_dataset_droid_full_tavid_mask_v2,
