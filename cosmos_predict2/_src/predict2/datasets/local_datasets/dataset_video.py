@@ -50,6 +50,8 @@ class VideoDataset(Dataset):
         target_mask_default_to_zero: bool = True,
         target_prompt_suffix: str = "",
         target_mask_dropout_prob: float = 0.0,
+        frame_stride: int = 1,
+        frame_stride_choices: Optional[list[int]] = None,
     ) -> None:
         """Dataset class for loading image-text-to-video generation data.
 
@@ -77,6 +79,16 @@ class VideoDataset(Dataset):
         self.target_prompt_suffix = target_prompt_suffix
         self.target_mask_dropout_prob = float(target_mask_dropout_prob)
         assert 0.0 <= self.target_mask_dropout_prob <= 1.0, "target_mask_dropout_prob must be in [0,1]"
+        # Temporal sub-sampling: 33 contiguous frames only cover ~2s of source
+        # video at 15 fps, so the model never sees the full task arc and the
+        # robot motion looks slow. With stride k, 33 frames span 33*k source
+        # frames -- choose k to cover the manipulation task length.
+        if frame_stride_choices is not None and len(frame_stride_choices) > 0:
+            assert all(int(s) >= 1 for s in frame_stride_choices), "frame_stride_choices must be >=1"
+            self.frame_stride_choices = [int(s) for s in frame_stride_choices]
+        else:
+            assert int(frame_stride) >= 1, "frame_stride must be >=1"
+            self.frame_stride_choices = [int(frame_stride)]
 
         # Determine caption format and directory
         self._setup_caption_format()
@@ -127,11 +139,18 @@ class VideoDataset(Dataset):
                 f"at least {self.sequence_length} frames are required."
             )
 
-        # randomly sample a sequence of frames
-        max_start_idx = total_frames - self.sequence_length
-        start_frame = np.random.randint(0, max_start_idx)
-        end_frame = start_frame + self.sequence_length
-        frame_ids = np.arange(start_frame, end_frame).tolist()
+        # Pick a stride that still fits the video; randomly sample from the
+        # configured choices, fall back to the largest fitting one.
+        candidates = [s for s in self.frame_stride_choices
+                      if (s * (self.sequence_length - 1) + 1) <= total_frames]
+        if not candidates:
+            stride = max(1, (total_frames - 1) // max(1, (self.sequence_length - 1)))
+        else:
+            stride = int(np.random.choice(candidates))
+        span = stride * (self.sequence_length - 1) + 1
+        max_start_idx = total_frames - span
+        start_frame = np.random.randint(0, max_start_idx + 1)
+        frame_ids = (start_frame + stride * np.arange(self.sequence_length)).tolist()
 
         frame_data = vr.get_batch(frame_ids).asnumpy()
         vr.seek(0)  # set video reader point back to 0 to clean up cache

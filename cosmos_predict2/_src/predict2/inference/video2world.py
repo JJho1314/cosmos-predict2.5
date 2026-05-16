@@ -892,19 +892,36 @@ class Video2WorldInference:
             else:
                 chunk_latent_conditional = self.model.tokenizer.get_latent_num_frames(chunk_overlap)
 
-            # TAViD-style target mask: pass the user-supplied mask only on the
-            # first chunk (since target_mask_condition_frames_only=True keeps it
-            # active solely on the conditioning frames). Subsequent chunks see a
-            # zero mask, matching the training-time dropout distribution.
+            # Per-frame TAViD target mask: slice the full mask track to this
+            # chunk's frame window so every chunk gets dense mask guidance
+            # (matches training when target_mask_condition_frames_only=False).
+            # If the user passed a single static mask (T==1), it is broadcast
+            # across all chunks (TAViD-original behaviour).
             chunk_target_mask: torch.Tensor | None = None
             if target_mask is not None:
-                _, _, _, mask_h, mask_w = chunk_input.shape[0], chunk_input.shape[1], chunk_input.shape[2], chunk_input.shape[3], chunk_input.shape[4]
-                if chunk_idx == 0:
-                    chunk_target_mask = _resize_mask_to(target_mask, model_required_frames, mask_h, mask_w)
+                mask_h, mask_w = chunk_input.shape[3], chunk_input.shape[4]
+                full_mask = _resize_mask_to(
+                    target_mask,
+                    num_frames=target_mask.shape[-3] if target_mask.ndim >= 3 else 1,
+                    height=mask_h,
+                    width=mask_w,
+                )
+                full_T = full_mask.shape[2]
+                if full_T == 1:
+                    # Static mask: broadcast to every frame of this chunk.
+                    chunk_target_mask = full_mask.repeat(1, 1, model_required_frames, 1, 1)
                 else:
-                    chunk_target_mask = torch.zeros(
-                        target_mask.shape[0], 1, model_required_frames, mask_h, mask_w, dtype=target_mask.dtype
-                    )
+                    # Per-frame mask: slice the window and zero-pad to model size.
+                    slice_end = min(end_frame, full_T)
+                    sliced = full_mask[:, :, start_frame:slice_end]
+                    pad_T = model_required_frames - sliced.shape[2]
+                    if pad_T > 0:
+                        pad = torch.zeros(
+                            sliced.shape[0], 1, pad_T, mask_h, mask_w,
+                            dtype=sliced.dtype, device=sliced.device,
+                        )
+                        sliced = torch.cat([sliced, pad], dim=2)
+                    chunk_target_mask = sliced
 
             # Generate chunk
             chunk_video = self.generate_vid2world(

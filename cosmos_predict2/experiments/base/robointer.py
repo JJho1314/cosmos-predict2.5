@@ -93,17 +93,22 @@ _dataloader_train_droid_full_tavid_mask = L(get_generic_dataloader)(
     prefetch_factor=2,
 )
 
-# v2: CFG-style joint mask + caption dropout, allow missing masks, weaker
-# attention alignment loss. Goal: keep base's long-video / no-mask behaviour
-# while learning mask guidance on the same backbone.
+# v2: TAViD-faithful (first-frame mask only) + temporal sub-sampling so the
+# 33-frame training clip spans the whole DROID task arc rather than ~2 s of
+# slow motion. The model sees the same first-frame-mask conditioning the
+# inference pipeline supplies, and learns "fast" task dynamics.
 _video_dataset_droid_full_tavid_mask_v2 = L(VideoDataset)(
     dataset_dir=_DATASET_DIR_TAVID_PRIMARY,
     num_frames=33,
     video_size=(176, 320),
     target_mask_dir="auto",
-    target_mask_default_to_zero=True,
+    target_mask_default_to_zero=False,
     target_prompt_suffix="The robot interacts with the [TGT] target object.",
-    target_mask_dropout_prob=0.3,
+    target_mask_dropout_prob=0.0,
+    # DROID episodes are 200~480 frames @ 15 fps (~13~32 s). With stride in
+    # {2, 4, 6} a 33-frame clip covers 4.4~13 s of source, multi-scale so the
+    # model handles different task tempos. Stride 1 still kept for fine motion.
+    frame_stride_choices=[1, 2, 4, 6],
 )
 _dataloader_train_droid_full_tavid_mask_v2 = L(get_generic_dataloader)(
     dataset=_video_dataset_droid_full_tavid_mask_v2,
@@ -649,11 +654,16 @@ predict2_video2world_training_2b_robointer_droid_tavid_v2 = dict(
     model_parallel=dict(context_parallel_size=1),
     model=dict(
         config=dict(
+            # TAViD-faithful: mask only on the conditioning frame, zero on
+            # every other frame. RoboInter per-frame masks get gated to the
+            # conditioning frame slice automatically.
             target_mask_condition_frames_only=True,
-            target_attention_loss_weight=0.005,
+            # No TAViD attention alignment loss; match the reference TAViD
+            # design which relies purely on the mask input channel.
+            target_attention_loss_weight=0.0,
             net=dict(
                 concat_target_mask=True,
-                tavid_attn_alignment_blocks=[16],
+                tavid_attn_alignment_blocks=[],
                 tavid_attn_query_chunk_size=1024,
             ),
         ),
