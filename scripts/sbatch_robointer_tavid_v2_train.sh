@@ -41,6 +41,11 @@ export IMAGINAIRE_OUTPUT_ROOT=/data/user/jhe724/workspace/cosmos-predict2.5/outp
 export TOKENIZERS_PARALLELISM=false
 export NCCL_DEBUG=WARN
 
+# venv currently has cosmos_cuda 1.4.x but the source merged upstream v1.5.x;
+# our patches don't touch cosmos_cuda APIs so the strict version check is
+# overridden here. Remove once `uv sync --extra=cuXXX` is run on the cluster.
+export COSMOS_SKIP_CUDA_VERSION_CHECK=1
+
 mkdir -p "$IMAGINAIRE_OUTPUT_ROOT"
 
 nvidia-smi -L

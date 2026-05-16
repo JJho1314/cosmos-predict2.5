@@ -24,9 +24,20 @@ def _check_cuda_extra():
         raise RuntimeError("CUDA extra not installed. Please run 'uv sync --extra=<cuda_name>'") from None
 
     if __version__ != cosmos_cuda.__version__:
-        raise RuntimeError(
-            f"CUDA extra version mismatch: {cosmos_cuda.__version__} != {__version__}. Please run 'uv sync --extra=<cuda_name>'"
+        import os
+        msg = (
+            f"CUDA extra version mismatch: {cosmos_cuda.__version__} != {__version__}. "
+            "Please run 'uv sync --extra=<cuda_name>'"
         )
+        if os.environ.get("COSMOS_SKIP_CUDA_VERSION_CHECK", "0") == "1":
+            import warnings
+            warnings.warn(
+                msg + " (skipped via COSMOS_SKIP_CUDA_VERSION_CHECK=1)",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+        raise RuntimeError(msg)
 
 
 _check_cuda_extra()
