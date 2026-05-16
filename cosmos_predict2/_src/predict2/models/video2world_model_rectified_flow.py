@@ -235,6 +235,18 @@ class Video2WorldModelRectifiedFlow(Text2WorldModelRectifiedFlow):
             is_cfg_conditional=False, num_conditional_frames=num_conditional_frames
         )
 
+        target_mask = data_batch.get("target_mask", None)
+        if target_mask is not None:
+            target_mask = target_mask.to(device=x0.device, dtype=x0.dtype)
+            target_mask = F.interpolate(target_mask, size=x0.shape[2:], mode="nearest")
+            if self.config.target_mask_condition_frames_only:
+                target_mask = target_mask * condition.condition_video_input_mask_B_C_T_H_W.type_as(target_mask)
+            condition = condition.set_target_mask(target_mask)
+
+        tgt_token_indices = data_batch.get("tgt_token_indices", None)
+        if tgt_token_indices is not None:
+            condition = condition.set_tgt_token_indices(tgt_token_indices.to(device=x0.device, dtype=torch.long))
+
         _, condition, _, _ = self.broadcast_split_for_model_parallelsim(x0, condition, None, None)
         _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(x0, uncondition, None, None)
 

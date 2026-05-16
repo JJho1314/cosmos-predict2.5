@@ -28,6 +28,7 @@ DEFAULT_CHECKPOINT_2B = MODEL_CHECKPOINTS[ModelKey(post_trained=False)]
 # DROID native is 320x180 @ 10 fps. 180 isn't a multiple of 16, so use 176.
 _DATASET_DIR_SANITY = "/data/user/jhe724/workspace/datasets/robointer_droid_sanity"
 _DATASET_DIR_FULL = "/data/user/jhe724/workspace/datasets/robointer_droid"
+_DATASET_DIR_TAVID_PRIMARY = "/data/user/jhe724/workspace/datasets/robointer_droid_tavid_primary"
 
 # droid_success is the 1280x720 @ 15 fps lerobot v3.0 release; we resize to
 # 560x1008 (16-aligned, ~720p detail retained) and feed 33-frame clips.
@@ -71,6 +72,25 @@ _dataloader_train_droid_full = L(get_generic_dataloader)(
     drop_last=True,
     num_workers=4,
     pin_memory=True,
+)
+
+_video_dataset_droid_full_tavid_mask = L(VideoDataset)(
+    dataset_dir=_DATASET_DIR_TAVID_PRIMARY,
+    num_frames=33,
+    video_size=(176, 320),
+    target_mask_dir="auto",
+    target_mask_default_to_zero=False,
+    target_prompt_suffix="The robot interacts with the [TGT] target object.",
+)
+_dataloader_train_droid_full_tavid_mask = L(get_generic_dataloader)(
+    dataset=_video_dataset_droid_full_tavid_mask,
+    sampler=L(get_sampler)(dataset=_video_dataset_droid_full_tavid_mask),
+    batch_size=1,
+    drop_last=True,
+    num_workers=8,
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=2,
 )
 
 
@@ -167,6 +187,67 @@ predict2_video2world_training_2b_robointer_droid = dict(
         ),
     ),
     model_parallel=dict(context_parallel_size=1),
+)
+
+
+# TAViD-style target-mask conditioning on RoboInter/LeRobot primary videos.
+# This uses RoboInter's own primary camera videos and SAM masks, which share the
+# same episode ids and frame counts.
+predict2_video2world_training_2b_robointer_droid_tavid_mask = dict(
+    defaults=[
+        f"/experiment/{DEFAULT_CHECKPOINT_2B.experiment}",
+        {"override /data_train": "mock"},
+        {"override /data_val": "mock"},
+        "_self_",
+    ],
+    dataloader_train=_dataloader_train_droid_full_tavid_mask,
+    checkpoint=dict(
+        save_iter=1000,
+        load_path=get_checkpoint_path(DEFAULT_CHECKPOINT_2B.s3.uri),
+        load_from_object_store=dict(enabled=False),
+        save_to_object_store=dict(enabled=False),
+        dcp_allow_mismatched_size=True,
+    ),
+    job=dict(
+        project="cosmos_predict_v2p5",
+        group="video2world",
+        name="2b_robointer_droid_tavid_mask_primary",
+        wandb_mode="online",
+    ),
+    optimizer=dict(lr=2 ** (-14.5), weight_decay=0.001),
+    scheduler=dict(
+        f_max=[0.5],
+        f_min=[0.2],
+        warm_up_steps=[1_000],
+        cycle_lengths=[100000],
+    ),
+    trainer=dict(
+        logging_iter=100,
+        max_iter=10000,
+        straggler_detection=dict(enabled=False),
+        callbacks=dict(
+            heart_beat=dict(save_s3=False),
+            iter_speed=dict(hit_thres=100, save_s3=False),
+            device_monitor=dict(save_s3=False),
+            every_n_sample_reg=dict(every_n=500, save_s3=False),
+            every_n_sample_ema=dict(every_n=500, save_s3=False),
+            wandb=dict(save_s3=False),
+            wandb_10x=dict(save_s3=False),
+            dataloader_speed=dict(save_s3=False),
+        ),
+    ),
+    model_parallel=dict(context_parallel_size=1),
+    model=dict(
+        config=dict(
+            target_mask_condition_frames_only=True,
+            target_attention_loss_weight=0.05,
+            net=dict(
+                concat_target_mask=True,
+                tavid_attn_alignment_blocks=[8, 12, 16, 20],
+                tavid_attn_query_chunk_size=1024,
+            ),
+        ),
+    ),
 )
 
 
@@ -499,6 +580,7 @@ cs = ConfigStore.instance()
 for _item in [
     predict2_video2world_training_2b_robointer_droid_sanity,
     predict2_video2world_training_2b_robointer_droid,
+    predict2_video2world_training_2b_robointer_droid_tavid_mask,
     predict2_video2world_training_2b_droid_success,
     predict2_video2world_training_2b_droid_success_phase2,
     predict2_video2world_training_2b_droid_success_failure,

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Run Cosmos 2B post-training with TAViD-style target-mask conditioning on
-# pre-resized DROID success/failure 480x864 data.
+# RoboInter/LeRobot DROID primary-camera videos.
 
-#SBATCH --job-name=cosmos-tavid480
+#SBATCH --job-name=cosmos-robo-tavid
 #SBATCH --partition=acd_u
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=96
 #SBATCH --time=72:00:00
-#SBATCH --output=/data/user/jhe724/workspace/cosmos-predict2.5/slurm-tavid480-%j.out
-#SBATCH --error=/data/user/jhe724/workspace/cosmos-predict2.5/slurm-tavid480-%j.err
+#SBATCH --output=/data/user/jhe724/workspace/cosmos-predict2.5/slurm-robointer-tavid-%j.out
+#SBATCH --error=/data/user/jhe724/workspace/cosmos-predict2.5/slurm-robointer-tavid-%j.err
 
 set -uo pipefail
 cd /data/user/jhe724/workspace/cosmos-predict2.5
@@ -35,7 +35,7 @@ export WANDB_MODE=online
 export WANDB_BASE_URL="http://10.12.1.245:8080"
 export WANDB_API_KEY="local-37151658708fac20809135dce9e234842db32f97"
 
-export IMAGINAIRE_OUTPUT_ROOT=/data/user/jhe724/workspace/cosmos-predict2.5/outputs/droid_success_failure_tavid_mask_480
+export IMAGINAIRE_OUTPUT_ROOT=/data/user/jhe724/workspace/cosmos-predict2.5/outputs/robointer_droid_tavid_mask_primary
 export TOKENIZERS_PARALLELISM=false
 export NCCL_DEBUG=WARN
 
@@ -44,21 +44,19 @@ mkdir -p "$IMAGINAIRE_OUTPUT_ROOT"
 nvidia-smi -L
 python -c "import torch; print('cuda count:', torch.cuda.device_count())"
 
-GRAD_ACCUM_ITER=${GRAD_ACCUM_ITER:-2}
-BATCH_SIZE=${BATCH_SIZE:-4}
+GRAD_ACCUM_ITER=${GRAD_ACCUM_ITER:-1}
+BATCH_SIZE=${BATCH_SIZE:-8}
 MAX_ITER=${MAX_ITER:-10000}
-EXPERIMENT=${EXPERIMENT:-predict2_video2world_training_2b_droid_success_failure_tavid_mask}
-JOB_NAME=${JOB_NAME:-2b_droid_success_failure_tavid_mask_480_bs64}
+JOB_NAME=${JOB_NAME:-2b_robointer_droid_tavid_mask_primary_10k_bs64}
 
-echo "=== TRAIN TAViD-mask 2B on 480x864 droid success/failure; experiment=${EXPERIMENT}; batch_size=${BATCH_SIZE}; grad_accum=${GRAD_ACCUM_ITER}; max_iter=${MAX_ITER}; job_name=${JOB_NAME} ==="
+echo "=== TRAIN RoboInter/LeRobot TAViD-mask 2B primary; per_gpu_batch=${BATCH_SIZE}; grad_accum=${GRAD_ACCUM_ITER}; global_batch=$((BATCH_SIZE * 8 * GRAD_ACCUM_ITER)); max_iter=${MAX_ITER}; job_name=${JOB_NAME} ==="
 torchrun --standalone --nproc_per_node=8 -m scripts.train \
   --config=cosmos_predict2/_src/predict2/configs/video2world/config.py \
-  -- experiment="$EXPERIMENT" \
+  -- experiment=predict2_video2world_training_2b_robointer_droid_tavid_mask \
   job.name="$JOB_NAME" \
   dataloader_train.batch_size="$BATCH_SIZE" \
   trainer.grad_accum_iter="$GRAD_ACCUM_ITER" \
-  trainer.max_iter="$MAX_ITER" \
-  trainer.validation_iter="$MAX_ITER"
+  trainer.max_iter="$MAX_ITER"
 status=$?
 echo "train_exit=$status"
 exit "$status"
