@@ -51,12 +51,12 @@ mkdir -p "$IMAGINAIRE_OUTPUT_ROOT"
 nvidia-smi -L
 python -c "import torch; print('cuda count:', torch.cuda.device_count())"
 
-GRAD_ACCUM_ITER=${GRAD_ACCUM_ITER:-2}     # 8 GPU * 1 micro * 2 accum = global 16
-BATCH_SIZE=${BATCH_SIZE:-1}
-MAX_ITER=${MAX_ITER:-5000}
-SAVE_ITER=${SAVE_ITER:-1000}
+GRAD_ACCUM_ITER=${GRAD_ACCUM_ITER:-1}     # default 8 GPU * 8 micro * 1 accum = global 64
+BATCH_SIZE=${BATCH_SIZE:-8}
+MAX_ITER=${MAX_ITER:-20140}                # 128866 samples / global 64 = 2014 iter/epoch * 10 epoch
+SAVE_ITER=${SAVE_ITER:-2000}
 CYCLE_LENGTH=${CYCLE_LENGTH:-30000}
-JOB_NAME=${JOB_NAME:-2b_robointer_droid_tavid_v2_5k_bs16}
+JOB_NAME=${JOB_NAME:-2b_robointer_droid_tavid_v2_10epoch_bs64}
 
 echo "=== TRAIN TAViD v2 (full FT, TAViD-faithful, frame_stride); per_gpu_batch=${BATCH_SIZE}; grad_accum=${GRAD_ACCUM_ITER}; global_batch=$((BATCH_SIZE * 8 * GRAD_ACCUM_ITER)); max_iter=${MAX_ITER}; save_iter=${SAVE_ITER}; cycle=${CYCLE_LENGTH}; job_name=${JOB_NAME} ==="
 torchrun --standalone --nproc_per_node=8 -m scripts.train \

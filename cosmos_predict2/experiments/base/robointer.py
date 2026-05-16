@@ -116,10 +116,10 @@ _dataloader_train_droid_full_tavid_mask_v2 = L(get_generic_dataloader)(
     sampler=L(get_sampler)(dataset=_video_dataset_droid_full_tavid_mask_v2),
     batch_size=1,
     drop_last=True,
-    num_workers=8,
+    num_workers=12,           # 8 GPU * 12 workers = 96 worker processes within --cpus-per-task=96
     pin_memory=True,
     persistent_workers=True,
-    prefetch_factor=2,
+    prefetch_factor=4,
 )
 
 
