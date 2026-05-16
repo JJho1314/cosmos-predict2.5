@@ -49,16 +49,20 @@ python -c "import torch; print('cuda count:', torch.cuda.device_count())"
 GRAD_ACCUM_ITER=${GRAD_ACCUM_ITER:-2}     # 8 GPU * 1 micro * 2 accum = global 16
 BATCH_SIZE=${BATCH_SIZE:-1}
 MAX_ITER=${MAX_ITER:-5000}
+SAVE_ITER=${SAVE_ITER:-1000}
+CYCLE_LENGTH=${CYCLE_LENGTH:-30000}
 JOB_NAME=${JOB_NAME:-2b_robointer_droid_tavid_v2_5k_bs16}
 
-echo "=== TRAIN TAViD v2 (full FT + dropout + weak attn loss); per_gpu_batch=${BATCH_SIZE}; grad_accum=${GRAD_ACCUM_ITER}; global_batch=$((BATCH_SIZE * 8 * GRAD_ACCUM_ITER)); max_iter=${MAX_ITER}; job_name=${JOB_NAME} ==="
+echo "=== TRAIN TAViD v2 (full FT, TAViD-faithful, frame_stride); per_gpu_batch=${BATCH_SIZE}; grad_accum=${GRAD_ACCUM_ITER}; global_batch=$((BATCH_SIZE * 8 * GRAD_ACCUM_ITER)); max_iter=${MAX_ITER}; save_iter=${SAVE_ITER}; cycle=${CYCLE_LENGTH}; job_name=${JOB_NAME} ==="
 torchrun --standalone --nproc_per_node=8 -m scripts.train \
   --config=cosmos_predict2/_src/predict2/configs/video2world/config.py \
   -- experiment=predict2_video2world_training_2b_robointer_droid_tavid_v2 \
   job.name="$JOB_NAME" \
   dataloader_train.batch_size="$BATCH_SIZE" \
   trainer.grad_accum_iter="$GRAD_ACCUM_ITER" \
-  trainer.max_iter="$MAX_ITER"
+  trainer.max_iter="$MAX_ITER" \
+  checkpoint.save_iter="$SAVE_ITER" \
+  scheduler.cycle_lengths="[$CYCLE_LENGTH]"
 status=$?
 echo "train_exit=$status"
 exit "$status"
