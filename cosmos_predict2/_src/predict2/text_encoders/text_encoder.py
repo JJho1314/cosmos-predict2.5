@@ -132,7 +132,7 @@ class TextEncoder:
         """Tokenize a target marker without chat-template special tokens."""
         tokenizer = getattr(self.model.tokenizer, "processor", self.model.tokenizer)
         tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
-        for text in (marker_text, f" {marker_text}"):
+        for text in (f" {marker_text}", marker_text):
             try:
                 ids = tokenizer.encode(text, add_special_tokens=False)
             except TypeError:

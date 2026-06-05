@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Re-encode a Cosmos VideoDataset videos/ directory and symlink its metas."""
+"""Re-encode a Cosmos VideoDataset videos/ directory and symlink sidecar files."""
 
 from __future__ import annotations
 
@@ -123,6 +123,16 @@ def main() -> int:
     metadata = src / "metadata.csv"
     if metadata.exists():
         relink(metadata, out / "metadata.csv")
+    frame_ranges = src / "frame_ranges.json"
+    if frame_ranges.exists():
+        relink(frame_ranges, out / "frame_ranges.json")
+    for mask_dirname in ("masks", "target_masks"):
+        src_masks = src / mask_dirname
+        if src_masks.exists():
+            out_masks = out / mask_dirname
+            out_masks.mkdir(parents=True, exist_ok=True)
+            for mask in sorted(src_masks.glob("*.npz")):
+                relink(mask, out_masks / mask.name)
 
     status_path = Path(args.status_csv)
     status_path.parent.mkdir(parents=True, exist_ok=True)

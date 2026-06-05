@@ -50,8 +50,11 @@ class VideoDataset(Dataset):
         target_mask_default_to_zero: bool = True,
         target_prompt_suffix: str = "",
         target_mask_dropout_prob: float = 0.0,
+        strip_tgt_token: bool = False,
+        exclude_video_stems_file: Optional[str] = None,
         frame_stride: int = 1,
         frame_stride_choices: Optional[list[int]] = None,
+        frame_start_policy: str = "random",
     ) -> None:
         """Dataset class for loading image-text-to-video generation data.
 
@@ -78,6 +81,8 @@ class VideoDataset(Dataset):
         self.target_mask_default_to_zero = target_mask_default_to_zero
         self.target_prompt_suffix = target_prompt_suffix
         self.target_mask_dropout_prob = float(target_mask_dropout_prob)
+        self.strip_tgt_token = strip_tgt_token
+        self.exclude_video_stems_file = exclude_video_stems_file
         assert 0.0 <= self.target_mask_dropout_prob <= 1.0, "target_mask_dropout_prob must be in [0,1]"
         # Temporal sub-sampling: 33 contiguous frames only cover ~2s of source
         # video at 15 fps, so the model never sees the full task arc and the
@@ -89,6 +94,8 @@ class VideoDataset(Dataset):
         else:
             assert int(frame_stride) >= 1, "frame_stride must be >=1"
             self.frame_stride_choices = [int(frame_stride)]
+        assert frame_start_policy in {"random", "range_start"}, "frame_start_policy must be 'random' or 'range_start'"
+        self.frame_start_policy = frame_start_policy
 
         # Determine caption format and directory
         self._setup_caption_format()
@@ -100,11 +107,33 @@ class VideoDataset(Dataset):
             self.video_paths = sorted(self.video_paths)
         else:
             self.video_paths = video_paths
+        self.video_paths = self._filter_excluded_video_stems(self.video_paths)
         log.info(f"{len(self.video_paths)} videos in total")
+        self.frame_ranges = self._load_frame_ranges()
 
         self.num_failed_loads = 0
         self.preprocess = T.Compose([ToTensorVideo(), ResizePreprocess((video_size[0], video_size[1]))])
         self.mask_size = (video_size[0], video_size[1])
+
+    def _filter_excluded_video_stems(self, video_paths: list[str]) -> list[str]:
+        """Drop split entries listed in an optional newline-delimited stem file."""
+        if not self.exclude_video_stems_file:
+            return video_paths
+        exclude_path = self.exclude_video_stems_file
+        if exclude_path.lower() == "auto":
+            exclude_path = os.path.join(self.dataset_dir, "exclude_no_tgt_stems.txt")
+        if not os.path.exists(exclude_path):
+            log.warning(f"exclude_video_stems_file does not exist: {exclude_path}")
+            return video_paths
+        with open(exclude_path, "r") as f:
+            excluded = {line.strip() for line in f if line.strip() and not line.startswith("#")}
+        if not excluded:
+            return video_paths
+        filtered = [
+            path for path in video_paths if os.path.splitext(os.path.basename(path))[0] not in excluded
+        ]
+        log.info(f"Filtered {len(video_paths) - len(filtered)} videos listed in {exclude_path}")
+        return filtered
 
     def __str__(self) -> str:
         return f"{len(self.video_paths)} samples from {self.dataset_dir}"
@@ -130,7 +159,33 @@ class VideoDataset(Dataset):
             return None
         return target_mask_dir
 
-    def _load_video(self, video_path: str) -> tuple[np.ndarray, float, np.ndarray]:
+    def _load_frame_ranges(self) -> dict[str, list[tuple[int, int]]]:
+        """Load optional per-video frame ranges used to avoid static lead-in/tail frames."""
+        ranges_path = os.path.join(self.dataset_dir, "frame_ranges.json")
+        if not os.path.exists(ranges_path):
+            return {}
+        try:
+            with open(ranges_path, "r") as f:
+                raw_ranges = json.load(f)
+        except Exception as exc:
+            log.warning(f"Failed to read frame ranges from {ranges_path}: {exc}")
+            return {}
+
+        frame_ranges: dict[str, list[tuple[int, int]]] = {}
+        for name, ranges in raw_ranges.items():
+            clean_ranges = []
+            for item in ranges:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    continue
+                start, end = int(item[0]), int(item[1])
+                if end >= start:
+                    clean_ranges.append((start, end))
+            if clean_ranges:
+                frame_ranges[str(name)] = clean_ranges
+        log.info(f"Loaded frame ranges for {len(frame_ranges)} videos from {ranges_path}")
+        return frame_ranges
+
+    def _load_video(self, video_path: str) -> tuple[np.ndarray, float, np.ndarray, int]:
         vr = VideoReader(video_path, ctx=cpu(0), num_threads=2)
         total_frames = len(vr)
         if total_frames < self.sequence_length:
@@ -139,17 +194,62 @@ class VideoDataset(Dataset):
                 f"at least {self.sequence_length} frames are required."
             )
 
-        # Pick a stride that still fits the video; randomly sample from the
-        # configured choices, fall back to the largest fitting one.
-        candidates = [s for s in self.frame_stride_choices
-                      if (s * (self.sequence_length - 1) + 1) <= total_frames]
-        if not candidates:
-            stride = max(1, (total_frames - 1) // max(1, (self.sequence_length - 1)))
+        video_basename = os.path.basename(video_path).replace(".mp4", "")
+        ranges = self.frame_ranges.get(video_basename, [(0, total_frames - 1)])
+        ranges = [
+            (max(0, start), min(total_frames - 1, end))
+            for start, end in ranges
+            if min(total_frames - 1, end) >= max(0, start)
+        ]
+        if not ranges:
+            ranges = [(0, total_frames - 1)]
+
+        # Pick a stride and range that fit; this lets curated datasets provide
+        # motion-only frame ranges without physically cutting every mp4.
+        range_candidates = []
+        for stride_choice in self.frame_stride_choices:
+            span_choice = stride_choice * (self.sequence_length - 1) + 1
+            for range_start, range_end in ranges:
+                if span_choice <= (range_end - range_start + 1):
+                    range_candidates.append((stride_choice, range_start, range_end))
+
+        if range_candidates:
+            stride, range_start, range_end = range_candidates[np.random.randint(len(range_candidates))]
+            span = stride * (self.sequence_length - 1) + 1
+            if self.frame_start_policy == "range_start":
+                start_frame = range_start
+            else:
+                max_start_idx = range_end - span + 1
+                start_frame = np.random.randint(range_start, max_start_idx + 1)
         else:
-            stride = int(np.random.choice(candidates))
-        span = stride * (self.sequence_length - 1) + 1
-        max_start_idx = total_frames - span
-        start_frame = np.random.randint(0, max_start_idx + 1)
+            if self.frame_start_policy == "range_start":
+                range_start, range_end = max(ranges, key=lambda item: item[1] - item[0])
+                range_len = range_end - range_start + 1
+                candidates = [
+                    s for s in self.frame_stride_choices if (s * (self.sequence_length - 1) + 1) <= range_len
+                ]
+                if candidates:
+                    stride = int(np.random.choice(candidates))
+                elif range_len >= self.sequence_length:
+                    stride = 1
+                else:
+                    candidates = [
+                        s for s in self.frame_stride_choices if (s * (self.sequence_length - 1) + 1) <= total_frames
+                    ]
+                    stride = int(np.random.choice(candidates)) if candidates else max(1, (total_frames - 1) // max(1, (self.sequence_length - 1)))
+                    range_start = 0
+                start_frame = range_start
+            else:
+                candidates = [
+                    s for s in self.frame_stride_choices if (s * (self.sequence_length - 1) + 1) <= total_frames
+                ]
+                if not candidates:
+                    stride = max(1, (total_frames - 1) // max(1, (self.sequence_length - 1)))
+                else:
+                    stride = int(np.random.choice(candidates))
+                span = stride * (self.sequence_length - 1) + 1
+                max_start_idx = total_frames - span
+                start_frame = np.random.randint(0, max_start_idx + 1)
         frame_ids = (start_frame + stride * np.arange(self.sequence_length)).tolist()
 
         frame_data = vr.get_batch(frame_ids).asnumpy()
@@ -160,7 +260,7 @@ class VideoDataset(Dataset):
         except Exception:  # failed to read FPS, assume it is 16
             fps = 16
         del vr  # delete the reader to avoid memory leak
-        return frame_data, fps, np.asarray(frame_ids, dtype=np.int64)
+        return frame_data, fps, np.asarray(frame_ids, dtype=np.int64), total_frames
 
     def _setup_caption_format(self) -> None:
         """Determine the caption format and set up the caption directory."""
@@ -232,13 +332,13 @@ class VideoDataset(Dataset):
             log.warning(f"Failed to read JSON caption file {json_path}: {e}")
             return ""
 
-    def _get_frames(self, video_path: str) -> tuple[torch.Tensor, float, np.ndarray]:
-        frames, fps, frame_ids = self._load_video(video_path)
+    def _get_frames(self, video_path: str) -> tuple[torch.Tensor, float, np.ndarray, int]:
+        frames, fps, frame_ids, total_frames = self._load_video(video_path)
         frames = frames.astype(np.uint8)
         frames = torch.from_numpy(frames).permute(0, 3, 1, 2)  # [T, C, H, W]
         frames = self.preprocess(frames)
         frames = torch.clamp(frames * 255.0, 0, 255).to(torch.uint8)
-        return frames, fps, frame_ids
+        return frames, fps, frame_ids, total_frames
 
     def _target_mask_path_candidates(self, video_basename: str) -> list[str]:
         if self.target_mask_dir is None:
@@ -256,10 +356,23 @@ class VideoDataset(Dataset):
         mask = (mask > 0.5).float()
         return mask.permute(1, 0, 2, 3).contiguous()
 
-    def _load_npz_target_mask(self, mask_path: str, frame_ids: np.ndarray) -> torch.Tensor:
+    def _load_npz_target_mask(
+        self,
+        mask_path: str,
+        frame_ids: np.ndarray,
+        video_frame_count: int | None = None,
+    ) -> torch.Tensor:
         mask_npz = np.load(mask_path, allow_pickle=True)
-        key = "masks" if "masks" in mask_npz.files else mask_npz.files[0]
-        mask_arr = mask_npz[key]
+        if "masks_packed" in mask_npz.files and "shape" in mask_npz.files:
+            shape = tuple(int(dim) for dim in mask_npz["shape"].tolist())
+            if len(shape) != 3:
+                raise ValueError(f"Unsupported packed target mask shape {shape} in {mask_path}")
+            flat_pixels = int(np.prod(shape[1:]))
+            unpacked = np.unpackbits(mask_npz["masks_packed"], axis=1)[:, :flat_pixels]
+            mask_arr = unpacked.reshape(shape)
+        else:
+            key = "masks" if "masks" in mask_npz.files else mask_npz.files[0]
+            mask_arr = mask_npz[key]
         if mask_arr.ndim == 5:
             # RoboInter SAM files are typically [N,T,1,H,W]. Merge annotated target
             # masks when multiple instances are present.
@@ -275,12 +388,28 @@ class VideoDataset(Dataset):
             mask_arr = np.repeat(mask_arr[None], len(frame_ids), axis=0)
         if mask_arr.ndim != 3:
             raise ValueError(f"Unsupported target mask shape {mask_arr.shape} in {mask_path}")
-        valid_frame_ids = np.clip(frame_ids, 0, mask_arr.shape[0] - 1)
+        if (
+            video_frame_count is not None
+            and video_frame_count > 1
+            and mask_arr.shape[0] > 1
+            and mask_arr.shape[0] != video_frame_count
+        ):
+            valid_frame_ids = np.rint(frame_ids * (mask_arr.shape[0] - 1) / (video_frame_count - 1)).astype(
+                np.int64
+            )
+        else:
+            valid_frame_ids = frame_ids
+        valid_frame_ids = np.clip(valid_frame_ids, 0, mask_arr.shape[0] - 1)
         mask_arr = mask_arr[valid_frame_ids]
         mask = torch.from_numpy(mask_arr).unsqueeze(1).float()  # [T,1,H,W]
         return self._resize_binary_mask_video(mask)
 
-    def _load_target_mask(self, video_basename: str, frame_ids: np.ndarray) -> torch.Tensor:
+    def _load_target_mask(
+        self,
+        video_basename: str,
+        frame_ids: np.ndarray,
+        video_frame_count: int | None = None,
+    ) -> torch.Tensor:
         """Load target mask as [1,T,H,W].
 
         If a mask video exists, it is sampled with the same frame ids as the RGB video.
@@ -305,7 +434,7 @@ class VideoDataset(Dataset):
             return self._resize_binary_mask_video(mask)
 
         if mask_path.endswith(".npz"):
-            return self._load_npz_target_mask(mask_path, frame_ids)
+            return self._load_npz_target_mask(mask_path, frame_ids, video_frame_count)
 
         mask_img = Image.open(mask_path).convert("L")
         mask = TF.to_tensor(mask_img)
@@ -316,7 +445,7 @@ class VideoDataset(Dataset):
     def __getitem__(self, index: int) -> dict | Any:
         try:
             data = dict()
-            video, fps, frame_ids = self._get_frames(self.video_paths[index])
+            video, fps, frame_ids, total_frames = self._get_frames(self.video_paths[index])
             video = video.permute(1, 0, 2, 3)  # Rearrange from [T, C, H, W] to [C, T, H, W]
 
             # Load caption based on format
@@ -329,6 +458,8 @@ class VideoDataset(Dataset):
             else:  # text format
                 caption_path = os.path.join(self.caption_dir, f"{video_basename}.txt")
                 caption = self._load_text(Path(caption_path))
+            if self.strip_tgt_token:
+                caption = " ".join(caption.replace("[TGT]", "").split())
             # CFG-style joint dropout: with prob `target_mask_dropout_prob`,
             # zero out the target mask AND drop the prompt suffix so the model
             # also sees the base caption distribution without mask guidance.
@@ -338,7 +469,7 @@ class VideoDataset(Dataset):
                 and random.random() < self.target_mask_dropout_prob
             )
 
-            if self.target_prompt_suffix and not drop_mask:
+            if self.target_prompt_suffix and not drop_mask and "[TGT]" not in caption:
                 caption = f"{caption.rstrip()} {self.target_prompt_suffix.strip()}".strip()
 
             data["video"] = video
@@ -349,8 +480,8 @@ class VideoDataset(Dataset):
                         1, len(frame_ids), *self.mask_size, dtype=torch.float32
                     )
                 else:
-                    data["target_mask"] = self._load_target_mask(video_basename, frame_ids)
-            if self.target_prompt_suffix and "[TGT]" in self.target_prompt_suffix and not drop_mask:
+                    data["target_mask"] = self._load_target_mask(video_basename, frame_ids, total_frames)
+            if not drop_mask and "[TGT]" in caption:
                 data["tgt_token_text"] = "[TGT]"
 
             _, _, h, w = video.shape

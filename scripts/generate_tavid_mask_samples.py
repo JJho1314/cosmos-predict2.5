@@ -28,12 +28,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--num-samples", type=int, default=8)
+    parser.add_argument("--skip-samples", type=int, default=0)
+    parser.add_argument("--sample-index-offset", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=35)
     parser.add_argument("--guidance", type=float, default=3.0)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--num-conditional-frames", type=int, default=1)
     parser.add_argument("--max-batches", type=int, default=400)
+    parser.add_argument("--standalone-only", action="store_true", help="Only save generated/GT videos and captions.")
     parser.add_argument("opts", nargs=argparse.REMAINDER)
     return parser.parse_args()
 
@@ -97,41 +100,50 @@ def save_sample_outputs(
     generated: torch.Tensor,
     caption: str,
     fps: int,
+    standalone_only: bool = False,
 ) -> dict:
     stem = f"sample_{sample_index:03d}"
-    overlay = make_overlay(raw, mask)
     raw01 = to_01(raw)
     gen01 = to_01(generated)
 
     generated_np = video_to_uint8(gen01)
     gt_np = video_to_uint8(raw01)
-    overlay_np = video_to_uint8(overlay)
-    grid_np = np.concatenate([overlay_np, generated_np, gt_np], axis=2)
 
     generated_path = output_dir / f"{stem}_generated.mp4"
     gt_path = output_dir / f"{stem}_gt.mp4"
-    overlay_path = output_dir / f"{stem}_mask_overlay.mp4"
-    grid_path = output_dir / f"{stem}_overlay_generated_gt.mp4"
-    sheet_path = output_dir / f"{stem}_contact.jpg"
     caption_path = output_dir / f"{stem}_caption.txt"
 
     write_video(str(generated_path), generated_np, fps=fps, lossless=False)
     write_video(str(gt_path), gt_np, fps=fps, lossless=False)
-    write_video(str(overlay_path), overlay_np, fps=fps, lossless=False)
-    write_video(str(grid_path), grid_np, fps=fps, lossless=False)
-    save_contact_sheet(sheet_path, raw, overlay, generated)
     caption_path.write_text(caption + "\n")
 
-    return {
+    record = {
         "sample_index": sample_index,
         "caption": caption,
         "generated": str(generated_path),
         "gt": str(gt_path),
-        "mask_overlay": str(overlay_path),
-        "overlay_generated_gt": str(grid_path),
-        "contact_sheet": str(sheet_path),
         "caption_file": str(caption_path),
     }
+    if standalone_only:
+        return record
+
+    overlay = make_overlay(raw, mask)
+    overlay_np = video_to_uint8(overlay)
+    grid_np = np.concatenate([overlay_np, generated_np, gt_np], axis=2)
+    overlay_path = output_dir / f"{stem}_mask_overlay.mp4"
+    grid_path = output_dir / f"{stem}_overlay_generated_gt.mp4"
+    sheet_path = output_dir / f"{stem}_contact.jpg"
+    write_video(str(overlay_path), overlay_np, fps=fps, lossless=False)
+    write_video(str(grid_path), grid_np, fps=fps, lossless=False)
+    save_contact_sheet(sheet_path, raw, overlay, generated)
+    record.update(
+        {
+            "mask_overlay": str(overlay_path),
+            "overlay_generated_gt": str(grid_path),
+            "contact_sheet": str(sheet_path),
+        }
+    )
+    return record
 
 
 def main() -> None:
@@ -172,11 +184,15 @@ def main() -> None:
 
     records = []
     saved = 0
+    skipped = 0
     with torch.no_grad():
         for batch_idx, data_batch in enumerate(dataloader):
             if batch_idx >= args.max_batches or saved >= args.num_samples:
                 break
             if "target_mask" not in data_batch or float(data_batch["target_mask"].sum()) <= 0:
+                continue
+            if skipped < args.skip_samples:
+                skipped += 1
                 continue
 
             data_batch = misc.to(data_batch, device="cuda")
@@ -206,12 +222,13 @@ def main() -> None:
             if distributed.is_rank0():
                 record = save_sample_outputs(
                     output_dir=output_dir,
-                    sample_index=saved,
+                    sample_index=args.sample_index_offset + saved,
                     raw=raw[0],
                     mask=data_batch["target_mask"][0],
                     generated=generated[0],
                     caption=caption,
                     fps=args.fps,
+                    standalone_only=args.standalone_only,
                 )
                 print(json.dumps(record, ensure_ascii=False), flush=True)
                 records.append(record)
@@ -223,11 +240,13 @@ def main() -> None:
             "checkpoint_iter_from_path": checkpoint_iter(args.checkpoint),
             "loaded_iter_returned_by_checkpointer": int(loaded_iter),
             "num_samples": len(records),
+            "skip_samples": args.skip_samples,
+            "sample_index_offset": args.sample_index_offset,
             "num_steps": args.num_steps,
             "guidance": args.guidance,
             "seed": args.seed,
             "fps": args.fps,
-            "layout": "overlay_generated_gt mp4 columns are: mask overlay, generated, ground truth",
+            "layout": "standalone generated/GT videos" if args.standalone_only else "overlay_generated_gt mp4 columns are: mask overlay, generated, ground truth",
             "samples": records,
         }
         with open(output_dir / "tavid_generation_summary.json", "w") as f:

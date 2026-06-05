@@ -11,6 +11,8 @@ Two configs are exposed:
   * `predict2_video2world_training_2b_robointer_droid`         - longer run
 """
 
+import os
+
 from hydra.core.config_store import ConfigStore
 from torch.utils.data import ConcatDataset
 
@@ -28,7 +30,10 @@ DEFAULT_CHECKPOINT_2B = MODEL_CHECKPOINTS[ModelKey(post_trained=False)]
 # DROID native is 320x180 @ 10 fps. 180 isn't a multiple of 16, so use 176.
 _DATASET_DIR_SANITY = "/data/user/jhe724/workspace/datasets/robointer_droid_sanity"
 _DATASET_DIR_FULL = "/data/user/jhe724/workspace/datasets/robointer_droid"
-_DATASET_DIR_TAVID_PRIMARY = "/data/user/jhe724/workspace/datasets/robointer_droid_tavid_primary"
+_DATASET_DIR_TAVID_PRIMARY = os.environ.get(
+    "ROBOINTER_DROID_TAVID_PRIMARY_DIR",
+    "/data/user/jhe724/workspace/datasets/robointer_droid_tavid_primary",
+)
 
 # droid_success is the 1280x720 @ 15 fps lerobot v3.0 release; we resize to
 # 560x1008 (16-aligned, ~720p detail retained) and feed 33-frame clips.
@@ -37,10 +42,28 @@ _DATASET_DIR_DROID_SUCCESS_TRAIN = "/data/user/jhe724/workspace/datasets/droid_s
 _DATASET_DIR_DROID_SUCCESS_TEST = "/data/user/jhe724/workspace/datasets/droid_success_left_test"
 _DATASET_DIR_DROID_SUCCESS_TRAIN_480 = "/data/user/jhe724/workspace/datasets/droid_success_left_train_480x864"
 _DATASET_DIR_DROID_SUCCESS_TEST_480 = "/data/user/jhe724/workspace/datasets/droid_success_left_test_480x864"
+_DATASET_DIR_DROID_SUCCESS_V21_TAVID = os.environ.get(
+    "DROID_SUCCESS_V21_TAVID_DIR",
+    "/data/user/jhe724/workspace/datasets/droid_success_v21_target_aware_left_right_480x864_train",
+)
+_DATASET_DIR_DROID_SUCCESS_V21_TAVID_VAL = os.environ.get(
+    "DROID_SUCCESS_V21_TAVID_VAL_DIR",
+    "/data/user/jhe724/workspace/datasets/droid_success_v21_target_aware_left_right_480x864_val",
+)
 _DATASET_DIR_DROID_FAILURE_ALL = "/data/user/jhe724/workspace/datasets/droid_failure_left_all"
 _DATASET_DIR_DROID_FAILURE_CLEAN = "/data/user/jhe724/workspace/datasets/droid_failure_left_all_clean"
 _DATASET_DIR_DROID_FAILURE_CLEAN_480 = "/data/user/jhe724/workspace/datasets/droid_failure_left_all_clean_480x864"
 _DROID_VIDEO_SIZE_480 = (480, 864)
+_DROID_SUCCESS_V21_TAVID_NUM_FRAMES = int(os.environ.get("DROID_SUCCESS_V21_TAVID_NUM_FRAMES", "49"))
+_DROID_SUCCESS_V21_TAVID_FRAME_STRIDES = [
+    int(item)
+    for item in os.environ.get("DROID_SUCCESS_V21_TAVID_FRAME_STRIDES", "2,3,4").split(",")
+    if item.strip()
+]
+_DROID_SUCCESS_V21_TAVID_FRAME_START_POLICY = os.environ.get(
+    "DROID_SUCCESS_V21_TAVID_FRAME_START_POLICY",
+    "range_start",
+)
 _DROID_SUCCESS_ITER_10000 = (
     "/data/user/jhe724/workspace/cosmos-predict2.5/outputs/droid_success/cosmos_predict_v2p5/"
     "video2world/2b_droid_success_560/checkpoints/iter_000010000"
@@ -383,6 +406,89 @@ _dataloader_val_droid_success_tavid_mask = L(get_generic_dataloader)(
     prefetch_factor=2,
 )
 
+_video_dataset_droid_success_v21_tavid_mask = L(VideoDataset)(
+    dataset_dir=_DATASET_DIR_DROID_SUCCESS_V21_TAVID,
+    num_frames=_DROID_SUCCESS_V21_TAVID_NUM_FRAMES,
+    video_size=_DROID_VIDEO_SIZE_480,
+    target_mask_dir="auto",
+    target_mask_default_to_zero=False,
+    target_prompt_suffix="The robot interacts with the [TGT] target object.",
+    exclude_video_stems_file="auto",
+    frame_stride_choices=_DROID_SUCCESS_V21_TAVID_FRAME_STRIDES,
+    frame_start_policy=_DROID_SUCCESS_V21_TAVID_FRAME_START_POLICY,
+)
+_video_dataset_droid_success_v21_val_tavid_mask = L(VideoDataset)(
+    dataset_dir=_DATASET_DIR_DROID_SUCCESS_V21_TAVID_VAL,
+    num_frames=_DROID_SUCCESS_V21_TAVID_NUM_FRAMES,
+    video_size=_DROID_VIDEO_SIZE_480,
+    target_mask_dir="auto",
+    target_mask_default_to_zero=False,
+    target_prompt_suffix="The robot interacts with the [TGT] target object.",
+    exclude_video_stems_file="auto",
+    frame_stride_choices=_DROID_SUCCESS_V21_TAVID_FRAME_STRIDES,
+    frame_start_policy=_DROID_SUCCESS_V21_TAVID_FRAME_START_POLICY,
+)
+_video_dataset_droid_success_v21_baseline = L(VideoDataset)(
+    dataset_dir=_DATASET_DIR_DROID_SUCCESS_V21_TAVID,
+    num_frames=_DROID_SUCCESS_V21_TAVID_NUM_FRAMES,
+    video_size=_DROID_VIDEO_SIZE_480,
+    target_mask_dir="none",
+    strip_tgt_token=True,
+    exclude_video_stems_file="auto",
+    frame_stride_choices=_DROID_SUCCESS_V21_TAVID_FRAME_STRIDES,
+    frame_start_policy=_DROID_SUCCESS_V21_TAVID_FRAME_START_POLICY,
+)
+_video_dataset_droid_success_v21_val_baseline = L(VideoDataset)(
+    dataset_dir=_DATASET_DIR_DROID_SUCCESS_V21_TAVID_VAL,
+    num_frames=_DROID_SUCCESS_V21_TAVID_NUM_FRAMES,
+    video_size=_DROID_VIDEO_SIZE_480,
+    target_mask_dir="none",
+    strip_tgt_token=True,
+    exclude_video_stems_file="auto",
+    frame_stride_choices=_DROID_SUCCESS_V21_TAVID_FRAME_STRIDES,
+    frame_start_policy=_DROID_SUCCESS_V21_TAVID_FRAME_START_POLICY,
+)
+_dataloader_train_droid_success_v21_tavid_mask = L(get_generic_dataloader)(
+    dataset=_video_dataset_droid_success_v21_tavid_mask,
+    sampler=L(get_sampler)(dataset=_video_dataset_droid_success_v21_tavid_mask),
+    batch_size=1,
+    drop_last=True,
+    num_workers=12,
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=4,
+)
+_dataloader_val_droid_success_v21_tavid_mask = L(get_generic_dataloader)(
+    dataset=_video_dataset_droid_success_v21_val_tavid_mask,
+    sampler=L(get_sampler)(dataset=_video_dataset_droid_success_v21_val_tavid_mask),
+    batch_size=1,
+    drop_last=False,
+    num_workers=4,
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=2,
+)
+_dataloader_train_droid_success_v21_baseline = L(get_generic_dataloader)(
+    dataset=_video_dataset_droid_success_v21_baseline,
+    sampler=L(get_sampler)(dataset=_video_dataset_droid_success_v21_baseline),
+    batch_size=1,
+    drop_last=True,
+    num_workers=12,
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=4,
+)
+_dataloader_val_droid_success_v21_baseline = L(get_generic_dataloader)(
+    dataset=_video_dataset_droid_success_v21_val_baseline,
+    sampler=L(get_sampler)(dataset=_video_dataset_droid_success_v21_val_baseline),
+    batch_size=1,
+    drop_last=False,
+    num_workers=4,
+    pin_memory=True,
+    persistent_workers=True,
+    prefetch_factor=2,
+)
+
 
 # Real run on droid_success high-res lerobot v3 dataset.
 predict2_video2world_training_2b_droid_success = dict(
@@ -604,6 +710,118 @@ predict2_video2world_training_2b_droid_success_failure_tavid_mask = dict(
     ),
 )
 
+predict2_video2world_training_2b_droid_success_v21_tavid_mask = dict(
+    defaults=[
+        f"/experiment/{DEFAULT_CHECKPOINT_2B.experiment}",
+        {"override /data_train": "mock"},
+        {"override /data_val": "mock"},
+        "_self_",
+    ],
+    dataloader_train=_dataloader_train_droid_success_v21_tavid_mask,
+    dataloader_val=_dataloader_val_droid_success_v21_tavid_mask,
+    checkpoint=dict(
+        save_iter=1000,
+        load_path=get_checkpoint_path(DEFAULT_CHECKPOINT_2B.s3.uri),
+        load_from_object_store=dict(enabled=False),
+        save_to_object_store=dict(enabled=False),
+        dcp_allow_mismatched_size=True,
+    ),
+    job=dict(
+        project="cosmos_predict_v2p5",
+        group="video2world",
+        name="2b_droid_success_v21_tavid_mask_480",
+        wandb_mode="online",
+    ),
+    optimizer=dict(lr=2 ** (-14.5), weight_decay=0.001),
+    scheduler=dict(
+        f_max=[0.5],
+        f_min=[0.2],
+        warm_up_steps=[1_000],
+        cycle_lengths=[100000],
+    ),
+    trainer=dict(
+        logging_iter=100,
+        max_iter=14000,
+        straggler_detection=dict(enabled=False),
+        callbacks=dict(
+            heart_beat=dict(save_s3=False),
+            iter_speed=dict(hit_thres=100, save_s3=False),
+            device_monitor=dict(save_s3=False),
+            every_n_sample_reg=dict(every_n=1000, save_s3=False),
+            every_n_sample_ema=dict(every_n=1000, save_s3=False),
+            wandb=dict(save_s3=False),
+            wandb_10x=dict(save_s3=False),
+            dataloader_speed=dict(save_s3=False),
+        ),
+    ),
+    model_parallel=dict(context_parallel_size=1),
+    model=dict(
+        config=dict(
+            target_mask_condition_frames_only=True,
+            target_attention_loss_weight=0.05,
+            net=dict(
+                concat_target_mask=True,
+                tavid_attn_alignment_blocks=[8, 12, 16, 20],
+                tavid_attn_query_chunk_size=1024,
+            ),
+        ),
+    ),
+)
+
+predict2_video2world_training_2b_droid_success_v21_baseline_nomask_noloss = dict(
+    defaults=[
+        f"/experiment/{DEFAULT_CHECKPOINT_2B.experiment}",
+        {"override /data_train": "mock"},
+        {"override /data_val": "mock"},
+        "_self_",
+    ],
+    dataloader_train=_dataloader_train_droid_success_v21_baseline,
+    dataloader_val=_dataloader_val_droid_success_v21_baseline,
+    checkpoint=dict(
+        save_iter=1000,
+        load_path=get_checkpoint_path(DEFAULT_CHECKPOINT_2B.s3.uri),
+        load_from_object_store=dict(enabled=False),
+        save_to_object_store=dict(enabled=False),
+    ),
+    job=dict(
+        project="cosmos_predict_v2p5",
+        group="video2world",
+        name="2b_droid_success_v21_baseline_nomask_noloss_480",
+        wandb_mode="online",
+    ),
+    optimizer=dict(lr=2 ** (-14.5), weight_decay=0.001),
+    scheduler=dict(
+        f_max=[0.5],
+        f_min=[0.2],
+        warm_up_steps=[1_000],
+        cycle_lengths=[100000],
+    ),
+    trainer=dict(
+        logging_iter=100,
+        max_iter=14000,
+        straggler_detection=dict(enabled=False),
+        callbacks=dict(
+            heart_beat=dict(save_s3=False),
+            iter_speed=dict(hit_thres=100, save_s3=False),
+            device_monitor=dict(save_s3=False),
+            every_n_sample_reg=dict(every_n=1000, save_s3=False),
+            every_n_sample_ema=dict(every_n=1000, save_s3=False),
+            wandb=dict(save_s3=False),
+            wandb_10x=dict(save_s3=False),
+            dataloader_speed=dict(save_s3=False),
+        ),
+    ),
+    model_parallel=dict(context_parallel_size=1),
+    model=dict(
+        config=dict(
+            target_attention_loss_weight=0.0,
+            net=dict(
+                tavid_attn_alignment_blocks=[],
+            ),
+        ),
+    ),
+)
+
 
 # v2: full finetune on the same RoboInter DROID primary data, but with
 # CFG-style mask + caption dropout, weaker (single-layer, 0.005) attention
@@ -682,6 +900,8 @@ for _item in [
     predict2_video2world_training_2b_droid_success_phase2,
     predict2_video2world_training_2b_droid_success_failure,
     predict2_video2world_training_2b_droid_success_failure_tavid_mask,
+    predict2_video2world_training_2b_droid_success_v21_tavid_mask,
+    predict2_video2world_training_2b_droid_success_v21_baseline_nomask_noloss,
 ]:
     experiment_name = [name.lower() for name, value in globals().items() if value is _item][0]
     cs.store(
